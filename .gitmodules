@@ -1,0 +1,9 @@
+[submodule "M_ShiftRegister"]
+	path = M_ShiftRegister
+	url = https://github.com/ERMA-Group/M_ShiftRegister
+[submodule "M_BSW_ESP32"]
+	path = M_BSW_ESP32
+	url = https://github.com/ERMA-Group/M_BSW_ESP32
+[submodule "M_ESTP"]
+	path = M_ESTP
+	url = https://github.com/ERMA-Group/M_ESTP
