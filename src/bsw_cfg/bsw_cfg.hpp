@@ -12,41 +12,11 @@
 namespace app {
 
 namespace sld_cfg {
-    constexpr uint16_t kSldNumberOfOutputs {48};
-    constexpr uint8_t kSldNumberOfPwmChannels {4};
+    constexpr uint16_t kSldNumberOfOutputs {1};
 } // namespace sld_cfg
 
 namespace gpio_cfg
 {
-    /* GPIO Siren pin settings */
-    constexpr uint8_t kGpioSirenId = 12;
-    constexpr bsw::GpioDirection kGpioSirenDirection = bsw::GpioDirection::kOutput;
-    constexpr bsw::GpioPullMode kGpioSirenPullMode = bsw::GpioPullMode::kNone;
-    constexpr bsw::GpioState kGpioSirenInitialState = bsw::GpioState::kLow;
-
-    /* GPIO PWM En1 pin settings */
-    constexpr uint8_t kGpioPwmEn1Id = 26;
-    constexpr bsw::GpioDirection kGpioPwmEn1Direction = bsw::GpioDirection::kOutput;
-    constexpr bsw::GpioPullMode kGpioPwmEn1PullMode = bsw::GpioPullMode::kNone;
-    constexpr bsw::GpioState kGpioPwmEn1InitialState = bsw::GpioState::kLow;
-
-    /* GPIO PWM En2 pin settings */
-    constexpr uint8_t kGpioPwmEn2Id = 13;
-    constexpr bsw::GpioDirection kGpioPwmEn2Direction = bsw::GpioDirection::kOutput;
-    constexpr bsw::GpioPullMode kGpioPwmEn2PullMode = bsw::GpioPullMode::kNone;
-    constexpr bsw::GpioState kGpioPwmEn2InitialState = bsw::GpioState::kLow;
-    /* GPIO PWM En3 pin settings */
-    constexpr uint8_t kGpioPwmEn3Id = 14;
-    constexpr bsw::GpioDirection kGpioPwmEn3Direction = bsw::GpioDirection::kOutput;
-    constexpr bsw::GpioPullMode kGpioPwmEn3PullMode = bsw::GpioPullMode::kNone;
-    constexpr bsw::GpioState kGpioPwmEn3InitialState = bsw::GpioState::kLow;
-
-    /* GPIO PWM En4 pin settings */
-    constexpr uint8_t kGpioPwmEn4Id = 15;
-    constexpr bsw::GpioDirection kGpioPwmEn4Direction = bsw::GpioDirection::kOutput;
-    constexpr bsw::GpioPullMode kGpioPwmEn4PullMode = bsw::GpioPullMode::kNone;
-    constexpr bsw::GpioState kGpioPwmEn4InitialState = bsw::GpioState::kLow;
-
     /* GPIO LED Status pin settings */
     constexpr uint8_t kGpioLedStatusId = 27;
     constexpr bsw::GpioDirection kGpioLedStatusDirection = bsw::GpioDirection::kOutput;
@@ -70,6 +40,12 @@ namespace gpio_cfg
     constexpr bsw::GpioDirection kGpioSerialLatchDirection = bsw::GpioDirection::kOutput;
     constexpr bsw::GpioPullMode kGpioSerialLatchPullMode = bsw::GpioPullMode::kNone;
     constexpr bsw::GpioState kGpioSerialLatchInitialState = bsw::GpioState::kLow;
+
+    /* GPIO Serial Enable pin settings */
+    constexpr uint8_t kGpioSerialEnableId = 26;
+    constexpr bsw::GpioDirection kGpioSerialEnableDirection = bsw::GpioDirection::kOutput;
+    constexpr bsw::GpioPullMode kGpioSerialEnablePullMode = bsw::GpioPullMode::kNone;
+    constexpr bsw::GpioState kGpioSerialEnableInitialState = bsw::GpioState::kLow;
 
     /* GPIO Reset Settings pin settings */
     constexpr uint8_t kGpioResetSettingsId = 34;
@@ -154,17 +130,12 @@ namespace uart_cfg
 namespace gpio
 {
     extern bsw::GpioController gpio_controller;
-    extern bsw::Gpio siren;
-    extern bsw::Gpio pwm_en1;
-    extern bsw::Gpio pwm_en2;
-    extern bsw::Gpio pwm_en3;
-    extern bsw::Gpio pwm_en4;
-    extern bsw::Gpio pwm_en4;
 
     extern bsw::Gpio led_status;
     extern bsw::Gpio serial_clock;
     extern bsw::Gpio serial_data;
     extern bsw::Gpio serial_latch;
+    extern bsw::Gpio serial_enable;
 
     extern bsw::Gpio reset_settings;
     extern bsw::Gpio radio_input;
@@ -178,7 +149,6 @@ namespace gpio
 
     // put them all in vector for easy initialization
     extern std::vector<bsw::Gpio*> gpios;
-    extern std::vector<bsw::Gpio*> pwm_gpios;
 }
 
 } // namespace app

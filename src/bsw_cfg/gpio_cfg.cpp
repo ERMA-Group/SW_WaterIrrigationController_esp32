@@ -11,52 +11,6 @@ namespace app::gpio {
 
 bsw::GpioController gpio_controller;
 
-bsw::Gpio siren(gpio_controller,
-                gpio_cfg::kGpioSirenId,
-                gpio_cfg::kGpioSirenDirection,
-                gpio_cfg::kGpioSirenPullMode,
-                gpio_cfg::kGpioSirenInitialState);
-
-bsw::Gpio pwm_en1(gpio_controller,
-                  gpio_cfg::kGpioPwmEn1Id,
-                  gpio_cfg::kGpioPwmEn1Direction,
-                  gpio_cfg::kGpioPwmEn1PullMode,
-                  gpio_cfg::kGpioPwmEn1InitialState,
-                  0, // PWM channel
-                  1, // PWM timer
-                  25000U, // PWM frequency
-                  100); // PWM duty cycle
-
-bsw::Gpio pwm_en2(gpio_controller,
-                  gpio_cfg::kGpioPwmEn2Id,
-                  gpio_cfg::kGpioPwmEn2Direction,
-                  gpio_cfg::kGpioPwmEn2PullMode,
-                  gpio_cfg::kGpioPwmEn2InitialState,
-                  1, // PWM channel
-                  1, // PWM timer
-                  25000U, // PWM frequency
-                  100); // PWM duty cycle
-
-bsw::Gpio pwm_en3(gpio_controller,
-                  gpio_cfg::kGpioPwmEn3Id,
-                  gpio_cfg::kGpioPwmEn3Direction,
-                  gpio_cfg::kGpioPwmEn3PullMode,
-                  gpio_cfg::kGpioPwmEn3InitialState,
-                  2, // PWM channel
-                  1, // PWM timer
-                  25000U, // PWM frequency
-                  100); // PWM duty cycle
-
-bsw::Gpio pwm_en4(gpio_controller,
-                  gpio_cfg::kGpioPwmEn4Id,
-                  gpio_cfg::kGpioPwmEn4Direction,
-                  gpio_cfg::kGpioPwmEn4PullMode,
-                  gpio_cfg::kGpioPwmEn4InitialState,
-                  3, // PWM channel
-                  1, // PWM timer
-                  25000U, // PWM frequency
-                  100); // PWM duty cycle
-
 bsw::Gpio led_status(gpio_controller,
                      gpio_cfg::kGpioLedStatusId,
                      gpio_cfg::kGpioLedStatusDirection,
@@ -80,6 +34,12 @@ bsw::Gpio serial_latch(gpio_controller,
                        gpio_cfg::kGpioSerialLatchDirection,
                        gpio_cfg::kGpioSerialLatchPullMode,
                        gpio_cfg::kGpioSerialLatchInitialState);
+
+bsw::Gpio serial_enable(gpio_controller,
+                        gpio_cfg::kGpioSerialEnableId,
+                        gpio_cfg::kGpioSerialEnableDirection,
+                        gpio_cfg::kGpioSerialEnablePullMode,
+                        gpio_cfg::kGpioSerialEnableInitialState);
 
 bsw::Gpio reset_settings(gpio_controller,
                          gpio_cfg::kGpioResetSettingsId,
@@ -137,11 +97,11 @@ bsw::Gpio spi_cs(gpio_controller,
 
 // put them all in vector for easy initialization
 std::vector<bsw::Gpio*> gpios = {
-    &siren,
     &led_status,
     &serial_clock,
     &serial_data,
     &serial_latch,
+    &serial_enable,
     &reset_settings,
     &radio_input,
     &radio_output,
@@ -151,13 +111,6 @@ std::vector<bsw::Gpio*> gpios = {
     &spi_miso,
     &spi_sck,
     &spi_cs
-};
-
-std::vector<bsw::Gpio*> pwm_gpios = {
-    &pwm_en1,
-    &pwm_en2,
-    &pwm_en3,
-    &pwm_en4
 };
 
 } // namespace app::gpio

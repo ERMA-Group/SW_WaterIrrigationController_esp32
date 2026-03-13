@@ -29,24 +29,9 @@ bool Sr_cbk_InitGpio(const uint8_t au8_pin, const Sr_GpioLevel_t ae_gpioLevel)
     return true; // Return success
 }
 
-bool Sr_cbk_InitPwm(const uint8_t au8_pwmChannel, const uint16_t au16_pwmFrequency,
-                      const uint8_t au8_pwmDutyCycle)
-{
-
-    /*App_InitGpioPwm(g_app_handle, au8_pin, (uint8_t)(0), 1,
-                 au8_pwmChannel, au16_pwmFrequency, au8_pwmDutyCycle);*/
-    return true; // Return success
-}
-
 bool Sr_cbk_SetGpio(const uint8_t au8_pin, const Sr_GpioLevel_t ae_gpioLevel)
 {
     App_SetGpio(g_app_handle, au8_pin, (uint8_t)(ae_gpioLevel));
-    return true; // Return success
-}
-
-bool Sr_cbk_SetPwm(const uint8_t au8_channel, const uint8_t au8_dutyCycle, const uint16_t au16_frequency, bool pwm_inverted)
-{
-    App_SetPwm(g_app_handle, au8_channel, au8_dutyCycle, au16_frequency, true, pwm_inverted);
     return true; // Return success
 }
 

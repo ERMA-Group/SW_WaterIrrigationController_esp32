@@ -15,8 +15,8 @@ Application::Application()
         app::gpio_cfg::kGpioSerialDataId, // dataPin
         app::gpio_cfg::kGpioSerialClockId, // clockPin
         app::gpio_cfg::kGpioSerialLatchId, // latchPin
+        app::gpio_cfg::kGpioSerialEnableId, // enablePin
         app::sld_cfg::kSldNumberOfOutputs, // number_of_outputs
-        app::sld_cfg::kSldNumberOfPwmChannels,   // number_of_pwm_channels
         2,   // latch_hold_time_us
         0,   // reset_pin_hold_time_us
         5,    // data_pin_hold_time_us
@@ -166,13 +166,13 @@ void Application::earlyStart()
     shift_register_.init();
     ca_bswEsp32_.init(comm_manager_.getDispatcher());
 
-    wifi_.connect("ssid", "key_to_wifi");
-    time_.init();
-    for (uint8_t i = 0; !time_.isSynced() && i < 50; ++i)
-    {
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    printf("Current Unix Timestamp: %u\n", time_.getUnixTimestamp());
+    // wifi_.connect("ssid", "key_to_wifi");
+    // time_.init();
+    // for (uint8_t i = 0; !time_.isSynced() && i < 50; ++i)
+    // {
+    //     vTaskDelay(100 / portTICK_PERIOD_MS);
+    // }
+    // printf("Current Unix Timestamp: %u\n", time_.getUnixTimestamp());
 
     printf("Application early start completed %u.%u.%u\n", kMajorVersion, kMinorVersion, kPatchVersion);
     ota_.cancel_rollback();
@@ -194,11 +194,6 @@ void Application::initGpio()
     for (auto gpio_ptr : app::gpio::gpios)
     {
         gpio_ptr->init();
-    }
-    for (auto pwm_gpio_ptr : app::gpio::pwm_gpios)
-    {
-        pwm_gpio_ptr->init();
-        pwm_gpio_ptr->initPwm(pwm_gpio_ptr->getPwmFrequency(), pwm_gpio_ptr->getPwmDutyCycle(), pwm_gpio_ptr->getPwmChannel(), pwm_gpio_ptr->getPwmTimer());
     }
 }
 
@@ -236,6 +231,7 @@ void Application::task32ms(void)
 void Application::task64ms(void)
 {
 }
+uint8_t output_data = 1;
 void Application::task128ms(void)
 {
     // toggle every 5th tick
@@ -247,6 +243,15 @@ void Application::task128ms(void)
     }
     counter = 0;
     gpio::led_status.toggleGpioState();
+
+    // cycle through all outputs of the shift register and toggle them, output is always 0, toggle just data
+    shift_register_.setOutput(0, output_data);
+    shift_register_.updateOutputs();
+    printf("Toggled shift register output: %02X\n", output_data);
+    if (output_data == 0)
+        output_data = 1;
+    else
+        output_data <<= 1;
 }
 
 uint16_t counter_10ms = 0;
@@ -384,24 +389,6 @@ void App_SetSldData(const App_Handle_t * as_handler, const uint8_t* au8_data, co
     }
     as_handler->instance->shift_register_.setData(au8_data, au8_size);
     as_handler->instance->shift_register_.updateOutputs();
-}
-
-void App_SetSldBrightness(const App_Handle_t * as_handler, const uint8_t au8_channel, const uint8_t au8_brightness)
-{
-    if (as_handler == nullptr || as_handler->instance == nullptr)
-    {
-        return;
-    }
-    as_handler->instance->shift_register_.setBrightness(au8_channel, au8_brightness);
-}
-
-void App_LedBoardTimerExpired(const App_Handle_t * as_handler, const uint8_t au8_timerId)
-{
-    if (as_handler == nullptr || as_handler->instance == nullptr)
-    {
-        return;
-    }
-    // do someaction when a timer expires on the led board
 }
 
 void App_Delay(uint64_t au64_delayUs)
