@@ -1,6 +1,7 @@
 # 1. Define the libraries
 add_library(SW_APP STATIC 
     application.cpp 
+    ${CMAKE_CURRENT_SOURCE_DIR}/asw_cfg/global_credentials.cpp
 
     # Command Adapters
     ${CMAKE_CURRENT_SOURCE_DIR}/command_handling/ca_bsw_esp32.cpp

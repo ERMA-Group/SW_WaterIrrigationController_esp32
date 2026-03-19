@@ -19,6 +19,7 @@
 #include "comm_manager.hpp"
 #include "ota.hpp"
 #include "wifi.hpp"
+#include "global_credentials.hpp"
 #include "time.hpp"
 #include "shift_register.hpp"
 
@@ -79,14 +80,26 @@ public:
     m_shiftregister::ShiftRegister shift_register_;
 
 private:
+    static constexpr uint32_t kResetHoldTimeMs {5000};
+    static constexpr uint8_t kWifiMaxConnectAttempts {3};
+
     command_addapter::CommManager<128, 1024> comm_manager_;
     std::array<uint8_t, 1024> uart_rx_buffer_;
     bool uart_initialized_ = false;
+    bool setup_mode_active_ = false;
+    bool reset_button_prev_pressed_ = false;
+    uint64_t reset_button_pressed_since_ms_ = 0;
+
     bsw::Wifi wifi_;
+    app::GlobalCredentials global_credentials_;
     bsw::Ota ota_;
     bsw::Time time_;
 
-    command_addapter::CaBswEsp32 ca_bswEsp32_{uart, ota_};
+    bool isResetButtonPressed() const;
+    void serviceResetButton();
+    void runWifiStartupFlow();
+
+    command_addapter::CaBswEsp32 ca_bswEsp32_{uart, ota_, wifi_, global_credentials_};
 };
 
 } // namespace app

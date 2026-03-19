@@ -3,6 +3,8 @@
  * @brief C++ class implementation
  */
 #include "application.hpp"
+#include "esp_system.h"
+#include "esp_timer.h"
 extern "C" {
 #include "application.h"
 }
@@ -141,7 +143,8 @@ void Application::start()
     lateStart();
     while (true)
     {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        serviceResetButton();
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -162,6 +165,11 @@ void Application::earlyStart()
 
 
     uart_initialized_ = uart.init();
+    wifi_.set_admin_credentials_callbacks({
+        &global_credentials_,
+        &app::GlobalCredentials::get_admin_credentials_cb,
+        &app::GlobalCredentials::set_admin_credentials_cb,
+    });
     comm_manager_.init();
     shift_register_.init();
     ca_bswEsp32_.init(comm_manager_.getDispatcher());
@@ -185,6 +193,8 @@ void Application::earlyStart()
  */
 void Application::lateStart()
 {
+    // Wi-Fi provisioning/connection can block; run it only after both schedulers are active.
+    runWifiStartupFlow();
 }
 
 void Application::initGpio()
@@ -234,10 +244,10 @@ void Application::task64ms(void)
 uint8_t output_data = 1;
 void Application::task128ms(void)
 {
-    // toggle every 5th tick
     static uint8_t counter { 0 };
+    const uint8_t blink_divider = setup_mode_active_ ? 1 : 5;
     counter++;
-    if (counter < 5)
+    if (counter < blink_divider)
     {
         return;
     }
@@ -245,13 +255,13 @@ void Application::task128ms(void)
     gpio::led_status.toggleGpioState();
 
     // cycle through all outputs of the shift register and toggle them, output is always 0, toggle just data
-    shift_register_.setOutput(0, output_data);
-    shift_register_.updateOutputs();
-    printf("Toggled shift register output: %02X\n", output_data);
-    if (output_data == 0)
-        output_data = 1;
-    else
-        output_data <<= 1;
+    // shift_register_.setOutput(0, output_data);
+    // shift_register_.updateOutputs();
+    // printf("Toggled shift register output: %02X\n", output_data);
+    // if (output_data == 0)
+    //     output_data = 1;
+    // else
+    //     output_data <<= 1;
 }
 
 uint16_t counter_10ms = 0;
@@ -260,6 +270,65 @@ portMUX_TYPE myMux = portMUX_INITIALIZER_UNLOCKED;
 bool renderedLastTick = false;
 void Application::c2task10ms(void)
 {
+}
+
+bool Application::isResetButtonPressed() const
+{
+    return gpio::reset_settings.getState() == bsw::GpioState::kHigh;
+}
+
+void Application::serviceResetButton()
+{
+    const bool pressed = isResetButtonPressed();
+    const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
+
+    if (pressed)
+    {
+        if (!reset_button_prev_pressed_)
+        {
+            reset_button_prev_pressed_ = true;
+            reset_button_pressed_since_ms_ = now_ms;
+            return;
+        }
+
+        const uint64_t held_ms = now_ms - reset_button_pressed_since_ms_;
+        if (held_ms >= kResetHoldTimeMs)
+        {
+            printf("Reset button held > %lu ms. Clearing Wi-Fi credentials and starting provisioning AP.\n",
+                   static_cast<unsigned long>(kResetHoldTimeMs));
+            wifi_.clear_wifi_credentials();
+            setup_mode_active_ = true;
+            wifi_.start_provisioning_portal_blocking();
+            setup_mode_active_ = false;
+            reset_button_prev_pressed_ = false;
+            reset_button_pressed_since_ms_ = 0;
+        }
+    }
+    else
+    {
+        reset_button_prev_pressed_ = false;
+        reset_button_pressed_since_ms_ = 0;
+    }
+}
+
+void Application::runWifiStartupFlow()
+{
+    wifi_.initialize();
+
+    if (!wifi_.has_wifi_credentials())
+    {
+        printf("No stored Wi-Fi credentials. Starting provisioning AP.\n");
+        setup_mode_active_ = true;
+        wifi_.start_provisioning_portal_blocking();
+        setup_mode_active_ = false;
+        return;
+    }
+
+    if (!wifi_.connect_from_nvram(kWifiMaxConnectAttempts))
+    {
+        printf("Wi-Fi connection failed after %u attempts. Restarting device.\n", kWifiMaxConnectAttempts);
+        esp_restart();
+    }
 }
 
 } // namespace app
