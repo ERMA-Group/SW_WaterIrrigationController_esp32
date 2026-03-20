@@ -7,15 +7,22 @@
 
 #include <string>
 
-#include "wifi.hpp"
-
 namespace app {
+
+enum class DeviceType
+{
+    Wired,
+    Wireless
+};
 
 class GlobalCredentials final {
 public:
     struct Credentials {
         std::string device_id;
         std::string device_password;
+        std::string pairing_pin;
+        DeviceType device_type;
+        uint32_t valve_count = 8;
     };
 
     GlobalCredentials() = default;
@@ -29,16 +36,25 @@ public:
                 bool reset_device_password,
                 Credentials& out);
 
-    bool get_admin_credentials(bsw::AdminCredentials& out);
-    bool set_admin_credentials(const bsw::AdminCredentials& in);
+    bool consume_pairing_pin(std::string& out_pin);
+    bool get_pairing_pin(std::string& out_pin);
+    bool set_pairing_pin(const std::string& pin);
+    bool set_device_type(DeviceType device_type);
+    DeviceType get_device_type() const;
+    bool set_valve_count(uint32_t valve_count);
+    uint32_t get_valve_count() const;
 
-    static bool get_admin_credentials_cb(void* context, bsw::AdminCredentials& out);
-    static bool set_admin_credentials_cb(void* context, const bsw::AdminCredentials& in);
+
+    static bool get_pairing_pin_cb(void* context, std::string& out_pin);
+    static bool set_pairing_pin_cb(void* context, const std::string& pin);
 
 private:
     static constexpr const char* kNs = "global_cfg";
     static constexpr const char* kKeyDeviceId = "device_id";
     static constexpr const char* kKeyDevicePassword = "device_password";
+    static constexpr const char* kKeyPairingPin = "pairing_pin";
+    static constexpr const char* kKeyDeviceType = "device_type";
+    static constexpr const char* kKeyValveCount = "valve_count";
 
     Credentials cache_{};
 

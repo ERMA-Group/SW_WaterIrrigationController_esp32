@@ -33,7 +33,9 @@ public:
         dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_otaUpdate>(kStartId + 0x00EF, this);
         dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_printApPassword>(kStartId + 0x0002, this);
         dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_generateCredentials>(kStartId + 0x0003, this);
-        dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_readCredentials>(kStartId + 0x0004, this);
+        dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_readDeviceData>(kStartId + 0x0004, this);
+        dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_setDeviceType>(kStartId + 0x0005, this);
+        dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_setNumberOfValves>(kStartId + 0x0006, this);
     }
 
     void command_testData(const uint8_t* data, const uint16_t len, uint8_t & response_code);
@@ -41,7 +43,9 @@ public:
     void command_otaUpdate(const uint8_t* data, const uint16_t len, uint8_t & response_code);
     void command_printApPassword(const uint8_t* data, const uint16_t len, uint8_t & response_code);
     void command_generateCredentials(const uint8_t* data, const uint16_t len, uint8_t & response_code);
-    void command_readCredentials(const uint8_t* data, const uint16_t len, uint8_t & response_code);
+    void command_readDeviceData(const uint8_t* data, const uint16_t len, uint8_t & response_code);
+    void command_setDeviceType(const uint8_t* data, const uint16_t len, uint8_t & response_code);
+    void command_setNumberOfValves(const uint8_t* data, const uint16_t len, uint8_t & response_code);
 
 private:
     bsw::Uart& uart_;

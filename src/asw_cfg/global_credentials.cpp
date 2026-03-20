@@ -13,6 +13,20 @@
 
 namespace app {
 
+namespace {
+
+DeviceType parse_device_type_u8(uint8_t value)
+{
+    return (value == 1U) ? DeviceType::Wireless : DeviceType::Wired;
+}
+
+uint8_t device_type_to_u8(DeviceType value)
+{
+    return (value == DeviceType::Wireless) ? 1U : 0U;
+}
+
+} // namespace
+
 bool GlobalCredentials::load_from_nvs()
 {
     bsw::Nvram nvs{kNs};
@@ -23,6 +37,9 @@ bool GlobalCredentials::load_from_nvs()
 
     cache_.device_id = nvs.get_string(kKeyDeviceId);
     cache_.device_password = nvs.get_string(kKeyDevicePassword);
+    cache_.pairing_pin = nvs.get_string(kKeyPairingPin);
+    cache_.device_type = parse_device_type_u8(nvs.get_value<uint8_t>(kKeyDeviceType, 0U));
+    cache_.valve_count = nvs.get_value<uint32_t>(kKeyValveCount, 8U);
     nvs.close();
     return true;
 }
@@ -37,6 +54,9 @@ bool GlobalCredentials::save_to_nvs()
 
     bool ok = nvs.set_string(kKeyDeviceId, cache_.device_id) == ESP_OK;
     ok = ok && (nvs.set_string(kKeyDevicePassword, cache_.device_password) == ESP_OK);
+    ok = ok && (nvs.set_string(kKeyPairingPin, cache_.pairing_pin) == ESP_OK);
+    ok = ok && (nvs.set_value<uint8_t>(kKeyDeviceType, device_type_to_u8(cache_.device_type)) == ESP_OK);
+    ok = ok && (nvs.set_value<uint32_t>(kKeyValveCount, cache_.valve_count) == ESP_OK);
     nvs.close();
     return ok;
 }
@@ -92,6 +112,11 @@ bool GlobalCredentials::ensure_loaded()
         cache_.device_password = generate_device_password();
         changed = true;
     }
+    if (cache_.valve_count == 0U)
+    {
+        cache_.valve_count = 8U;
+        changed = true;
+    }
 
     if (changed)
     {
@@ -144,25 +169,70 @@ bool GlobalCredentials::update(const std::string& new_device_id,
     return true;
 }
 
-bool GlobalCredentials::get_admin_credentials(bsw::AdminCredentials& out)
+bool GlobalCredentials::get_pairing_pin(std::string& out_pin)
 {
-    Credentials credentials{};
-    if (!get(credentials))
+    out_pin.clear();
+    if (!ensure_loaded())
     {
         return false;
     }
-    out.device_id = credentials.device_id;
-    out.device_password = credentials.device_password;
+
+    out_pin = cache_.pairing_pin;
     return true;
 }
 
-bool GlobalCredentials::set_admin_credentials(const bsw::AdminCredentials& in)
+bool GlobalCredentials::set_pairing_pin(const std::string& pin)
 {
-    Credentials out{};
-    return update(in.device_id, true, in.device_password, true, false, out);
+    if (!ensure_loaded())
+    {
+        return false;
+    }
+
+    cache_.pairing_pin = pin;
+    return save_to_nvs();
 }
 
-bool GlobalCredentials::get_admin_credentials_cb(void* context, bsw::AdminCredentials& out)
+bool GlobalCredentials::set_device_type(DeviceType device_type)
+{
+    if (!ensure_loaded())
+    {
+        return false;
+    }
+
+    cache_.device_type = device_type;
+    return save_to_nvs();
+}
+
+bool GlobalCredentials::set_valve_count(uint32_t valve_count)
+{
+    if (!ensure_loaded())
+    {
+        return false;
+    }
+
+    cache_.valve_count = (valve_count == 0U) ? 8U : valve_count;
+    return save_to_nvs();
+}
+
+bool GlobalCredentials::consume_pairing_pin(std::string& out_pin)
+{
+    out_pin.clear();
+    if (!ensure_loaded())
+    {
+        return false;
+    }
+
+    if (cache_.pairing_pin.empty())
+    {
+        return false;
+    }
+
+    out_pin = cache_.pairing_pin;
+    cache_.pairing_pin.clear();
+    return save_to_nvs();
+}
+
+bool GlobalCredentials::get_pairing_pin_cb(void* context, std::string& out_pin)
 {
     if (context == nullptr)
     {
@@ -170,10 +240,10 @@ bool GlobalCredentials::get_admin_credentials_cb(void* context, bsw::AdminCreden
     }
 
     auto* self = static_cast<GlobalCredentials*>(context);
-    return self->get_admin_credentials(out);
+    return self->get_pairing_pin(out_pin);
 }
 
-bool GlobalCredentials::set_admin_credentials_cb(void* context, const bsw::AdminCredentials& in)
+bool GlobalCredentials::set_pairing_pin_cb(void* context, const std::string& pin)
 {
     if (context == nullptr)
     {
@@ -181,7 +251,18 @@ bool GlobalCredentials::set_admin_credentials_cb(void* context, const bsw::Admin
     }
 
     auto* self = static_cast<GlobalCredentials*>(context);
-    return self->set_admin_credentials(in);
+    return self->set_pairing_pin(pin);
 }
+
+DeviceType GlobalCredentials::get_device_type() const
+{
+    return cache_.device_type;
+}
+
+uint32_t GlobalCredentials::get_valve_count() const
+{
+    return cache_.valve_count;
+}
+
 
 } // namespace app

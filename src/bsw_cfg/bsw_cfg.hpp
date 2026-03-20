@@ -12,7 +12,7 @@
 namespace app {
 
 namespace sld_cfg {
-    constexpr uint16_t kSldNumberOfOutputs {1};
+    constexpr uint16_t kSldNumberOfOutputs {8};
 } // namespace sld_cfg
 
 namespace gpio_cfg

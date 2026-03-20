@@ -3,13 +3,39 @@
  * @brief C++ class implementation
  */
 #include "application.hpp"
+#include "cloud/device_claim_client.hpp"
+#include "asw_cfg/fw_version.hpp"
+#include "asw_cfg/build_version.hpp"
+#include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+
+#include <cstdio>
+#include <cstring>
+
 extern "C" {
 #include "application.h"
 }
 
 namespace app {
+
+namespace {
+
+std::string composeFirmwareVersion()
+{
+    char buffer[32] = {0};
+    std::snprintf(buffer,
+                  sizeof(buffer),
+                  "%u.%u.%u+%u",
+                  static_cast<unsigned int>(fw::kMajor),
+                  static_cast<unsigned int>(fw::kMinor),
+                  static_cast<unsigned int>(fw::kPatch),
+                  static_cast<unsigned int>(fw::kBuild));
+    return std::string(buffer);
+}
+
+} // namespace
+
     // create
 Application::Application()
     : gpio_controller{},
@@ -144,13 +170,23 @@ void Application::start()
     while (true)
     {
         serviceResetButton();
+        serviceManualRuns();
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
 void Application::earlyStart()
 {
+    esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
+
     initGpio();
+
+    wifi_.set_pairing_pin_callback([this](const std::string& pairing_pin) {
+        if (!global_credentials_.set_pairing_pin(pairing_pin))
+        {
+            printf("Failed to persist pairing PIN from provisioning portal.\n");
+        }
+    });
 
     bsw::Spi::Config spi_config {
         spi_cfg::kSpiHost,
@@ -165,11 +201,6 @@ void Application::earlyStart()
 
 
     uart_initialized_ = uart.init();
-    wifi_.set_admin_credentials_callbacks({
-        &global_credentials_,
-        &app::GlobalCredentials::get_admin_credentials_cb,
-        &app::GlobalCredentials::set_admin_credentials_cb,
-    });
     comm_manager_.init();
     shift_register_.init();
     ca_bswEsp32_.init(comm_manager_.getDispatcher());
@@ -182,7 +213,9 @@ void Application::earlyStart()
     // }
     // printf("Current Unix Timestamp: %u\n", time_.getUnixTimestamp());
 
-    printf("Application early start completed %u.%u.%u\n", kMajorVersion, kMinorVersion, kPatchVersion);
+    const std::string fw_version = composeFirmwareVersion();
+    server_sync_client_.setFirmwareVersion(fw_version);
+    printf("Application early start completed %s\n", fw_version.c_str());
     ota_.cancel_rollback();
 }
 
@@ -195,6 +228,7 @@ void Application::lateStart()
 {
     // Wi-Fi provisioning/connection can block; run it only after both schedulers are active.
     runWifiStartupFlow();
+    startServerCommunicationTasks();
 }
 
 void Application::initGpio()
@@ -244,24 +278,72 @@ void Application::task64ms(void)
 uint8_t output_data = 1;
 void Application::task128ms(void)
 {
-    static uint8_t counter { 0 };
-    const uint8_t blink_divider = setup_mode_active_ ? 1 : 5;
-    counter++;
-    if (counter < blink_divider)
+    bool in_setup_mode = setup_mode_active_;
+    bool wifi_connected = wifi_.is_connected();
+    bool is_paired = paired_confirmed_.load();
+    
+    if (in_setup_mode)
     {
-        return;
+        current_led_state_ = LedIndicatorState::kResetMode;
     }
-    counter = 0;
-    gpio::led_status.toggleGpioState();
+    else if (!wifi_connected)
+    {
+        current_led_state_ = LedIndicatorState::kWifiConnectMode;
+    }
+    else if (!is_paired)
+    {
+        current_led_state_ = LedIndicatorState::kServerPairingMode;
+    }
+    else
+    {
+        current_led_state_ = LedIndicatorState::kConnected;
+    }
 
-    // cycle through all outputs of the shift register and toggle them, output is always 0, toggle just data
-    // shift_register_.setOutput(0, output_data);
-    // shift_register_.updateOutputs();
-    // printf("Toggled shift register output: %02X\n", output_data);
-    // if (output_data == 0)
-    //     output_data = 1;
-    // else
-    //     output_data <<= 1;
+    static uint8_t blink_counter { 0 };
+    
+    switch (current_led_state_)
+    {
+        case LedIndicatorState::kResetMode:
+        {
+            gpio::led_status.toggleGpioState();
+            break;
+        }
+
+        case LedIndicatorState::kWifiConnectMode:
+        {
+            blink_counter++;
+            if (blink_counter >= 2)
+            {
+                blink_counter = 0;
+                gpio::led_status.toggleGpioState();
+            }
+            break;
+        }
+
+        case LedIndicatorState::kServerPairingMode:
+        {
+            blink_counter = static_cast<uint8_t>((blink_counter + 1U) % 4U);
+            if (blink_counter < 3U)
+            {
+                gpio::led_status.setState(bsw::GpioState::kHigh);
+            }
+            else
+            {
+                gpio::led_status.setState(bsw::GpioState::kLow);
+            }
+            break;
+        }
+
+        case LedIndicatorState::kConnected:
+        {
+            if (gpio::led_status.getState() != bsw::GpioState::kHigh)
+            {
+                gpio::led_status.setState(bsw::GpioState::kHigh);
+            }
+            blink_counter = 0;
+            break;
+        }
+    }
 }
 
 uint16_t counter_10ms = 0;
@@ -311,9 +393,31 @@ void Application::serviceResetButton()
     }
 }
 
+void Application::serviceManualRuns()
+{
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    const uint32_t max_valves = (valve_count_ <= app::sld_cfg::kSldNumberOfOutputs) ? valve_count_ : app::sld_cfg::kSldNumberOfOutputs;
+    for (uint32_t i = 0; i < max_valves; ++i)
+    {
+        if (!valve_open_states_[i])
+        {
+            continue;
+        }
+        if (now_us < valve_close_deadlines_us_[i])
+        {
+            continue;
+        }
+
+        closeValve(static_cast<uint16_t>(i));
+        printf("Manual run timeout reached, valve %lu closed.\n", static_cast<unsigned long>(i));
+    }
+}
+
 void Application::runWifiStartupFlow()
 {
     wifi_.initialize();
+    paired_confirmed_.store(false);
+    server_tasks_allowed_ = true;
 
     if (!wifi_.has_wifi_credentials())
     {
@@ -329,6 +433,211 @@ void Application::runWifiStartupFlow()
         printf("Wi-Fi connection failed after %u attempts. Restarting device.\n", kWifiMaxConnectAttempts);
         esp_restart();
     }
+
+    app::GlobalCredentials::Credentials credentials{};
+    if (global_credentials_.get(credentials))
+    {
+        device_hw_id_ = credentials.device_id;
+        valve_count_ = credentials.valve_count;
+        if (valve_count_ == 0U)
+        {
+            valve_count_ = app::sld_cfg::kSldNumberOfOutputs;
+        }
+        if (valve_count_ > app::sld_cfg::kSldNumberOfOutputs)
+        {
+            valve_count_ = app::sld_cfg::kSldNumberOfOutputs;
+        }
+    }
+    else
+    {
+        device_hw_id_ = "UNKNOWN";
+        valve_count_ = app::sld_cfg::kSldNumberOfOutputs;
+    }
+
+    std::string pairing_pin;
+    if (global_credentials_.consume_pairing_pin(pairing_pin) && !pairing_pin.empty() && !device_hw_id_.empty())
+    {
+        const auto claim_result = cloud::DeviceClaimClient::Claim(device_hw_id_, pairing_pin);
+        printf("device_claim result: %s\n", cloud::DeviceClaimClient::ResultToString(claim_result));
+        const bool claim_success =
+            (claim_result == cloud::DeviceClaimClient::ClaimResult::kSuccess) ||
+            (claim_result == cloud::DeviceClaimClient::ClaimResult::kAlreadyClaimed);
+        paired_confirmed_.store(claim_success);
+        server_tasks_allowed_ = true;
+    }
+    else
+    {
+        paired_confirmed_.store(false);
+        server_tasks_allowed_ = true;
+    }
+}
+
+void Application::startServerCommunicationTasks()
+{
+    if (!server_tasks_allowed_)
+    {
+        printf("Skipping server communication tasks until pairing claim succeeds.\n");
+        return;
+    }
+
+    server_sync_client_.setCommandHandlers({
+        this,
+        &Application::cloudManualRunCb,
+        &Application::cloudStopRunCb,
+        &Application::cloudRestartCb,
+        &Application::cloudFactoryResetCb,
+        &Application::cloudUpdateCb,
+        &Application::cloudSyncOkCb,
+    });
+    server_sync_client_.setDeviceHwId(device_hw_id_);
+    server_sync_client_.setValveCount(valve_count_);
+    for (uint32_t i = 0; i < valve_count_; ++i)
+    {
+        server_sync_client_.setValveState(i, valve_open_states_[i]);
+    }
+    server_sync_client_.start();
+}
+
+void Application::cloudManualRunCb(void* context, uint32_t valve_index, uint32_t duration_sec)
+{
+    auto* self = static_cast<Application*>(context);
+    if (self == nullptr)
+    {
+        return;
+    }
+    self->handleManualRunCommand(valve_index, duration_sec);
+}
+
+void Application::cloudStopRunCb(void* context, uint32_t valve_index)
+{
+    auto* self = static_cast<Application*>(context);
+    if (self == nullptr)
+    {
+        return;
+    }
+    self->handleStopRunCommand(valve_index);
+}
+
+void Application::cloudRestartCb(void* context)
+{
+    auto* self = static_cast<Application*>(context);
+    if (self == nullptr)
+    {
+        return;
+    }
+    esp_restart();
+}
+
+void Application::cloudFactoryResetCb(void* context)
+{
+    auto* self = static_cast<Application*>(context);
+    if (self == nullptr)
+    {
+        return;
+    }
+    printf("Factory reset triggered by cloud command. Clearing Wi-Fi credentials and restarting.\n");
+    self->wifi_.clear_wifi_credentials();
+    self->paired_confirmed_.store(false);
+    esp_restart();
+}
+
+void Application::cloudUpdateCb(void* context, const char* firmware_url)
+{
+    auto* self = static_cast<Application*>(context);
+    if (self == nullptr || firmware_url == nullptr)
+    {
+        return;
+    }
+    self->ota_.start_update(firmware_url);
+}
+
+void Application::cloudSyncOkCb(void* context)
+{
+    auto* self = static_cast<Application*>(context);
+    if (self == nullptr)
+    {
+        return;
+    }
+
+    if (!self->paired_confirmed_.load())
+    {
+        self->paired_confirmed_.store(true);
+        printf("Pairing confirmed by successful device_sync.\n");
+    }
+}
+
+void Application::handleManualRunCommand(uint32_t valve_index, uint32_t duration_sec)
+{
+    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kSldNumberOfOutputs)
+    {
+        printf("Unsupported valve index: %lu\n", static_cast<unsigned long>(valve_index));
+        return;
+    }
+
+    openValve(static_cast<uint16_t>(valve_index));
+    valve_close_deadlines_us_[valve_index] = static_cast<uint64_t>(esp_timer_get_time()) +
+                                             static_cast<uint64_t>(duration_sec) * 1000000ULL;
+    printf("Manual run started for valve %lu, duration %u s\n",
+           static_cast<unsigned long>(valve_index),
+           duration_sec);
+}
+
+void Application::handleStopRunCommand(uint32_t valve_index)
+{
+    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kSldNumberOfOutputs)
+    {
+        printf("Unsupported valve index: %lu\n", static_cast<unsigned long>(valve_index));
+        return;
+    }
+
+    closeValve(static_cast<uint16_t>(valve_index));
+    printf("Manual run stopped for valve %lu\n", static_cast<unsigned long>(valve_index));
+}
+
+DeviceType Application::getDeviceType() const
+{
+    return global_credentials_.get_device_type();
+}
+
+void Application::openValve(uint16_t valve_index)
+{
+    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kSldNumberOfOutputs)
+    {
+        printf("openValve: unsupported index %u\n", valve_index);
+        return;
+    }
+
+    if (getDeviceType() == DeviceType::Wired)
+    {
+        shift_register_.setOutput(0, 1 << valve_index);
+        shift_register_.updateOutputs();
+        valve_open_states_[valve_index] = true;
+        server_sync_client_.setValveState(valve_index, true);
+        printf("Valve %u opened.\n", valve_index);
+    }
+    else
+    {
+        printf("Open valve command received for valve %u, but radio control is not implemented yet.\n", valve_index);
+    }
+}
+
+void Application::closeValve(uint16_t valve_index)
+{
+    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kSldNumberOfOutputs)
+    {
+        printf("closeValve: unsupported index %u\n", valve_index);
+        return;
+    }
+
+    if (getDeviceType() == DeviceType::Wired)
+    {
+        shift_register_.setOutput(0, shift_register_.getData(0) & ~(1 << valve_index));
+        shift_register_.updateOutputs();
+    }
+
+    valve_open_states_[valve_index] = false;
+    valve_close_deadlines_us_[valve_index] = 0;
+    server_sync_client_.setValveState(valve_index, false);
 }
 
 } // namespace app

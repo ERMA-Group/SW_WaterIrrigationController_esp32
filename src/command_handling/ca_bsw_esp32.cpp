@@ -196,7 +196,7 @@ void CaBswEsp32::command_generateCredentials(const uint8_t* data, const uint16_t
     response_code = 0x01;
 }
 
-void CaBswEsp32::command_readCredentials(const uint8_t* data, const uint16_t len, uint8_t & response_code)
+void CaBswEsp32::command_readDeviceData(const uint8_t* data, const uint16_t len, uint8_t & response_code)
 {
     (void)data;
     (void)len;
@@ -214,7 +214,82 @@ void CaBswEsp32::command_readCredentials(const uint8_t* data, const uint16_t len
     printf("Device ID: %s\n", global_credentials.device_id.c_str());
     printf("Device Password: %s\n", global_credentials.device_password.c_str());
     printf("AP Password: %s\n", ap_password.c_str());
+    printf("Device Type: %s\n", global_credentials.device_type == app::DeviceType::Wireless ? "radio" : "wired");
+    printf("Valve Count: %u\n", global_credentials.valve_count);
     response_code = 0x01;
 }
 
+void CaBswEsp32::command_setDeviceType(const uint8_t* data, const uint16_t len, uint8_t & response_code)
+{
+    if (data == nullptr || len < 1)
+    {
+        printf("Set Device Type: invalid payload.\n");
+        response_code = 0x02;
+        return;
+    }
+
+    const uint8_t device_type_value = data[0];
+    if (device_type_value != 0x00 && device_type_value != 0x01)
+    {
+        printf("Set Device Type: unsupported value 0x%02X (expected 0x00=wired, 0x01=radio).\n", device_type_value);
+        response_code = 0x02;
+        return;
+    }
+
+    const app::DeviceType device_type = (device_type_value == 0x01) ? app::DeviceType::Wireless : app::DeviceType::Wired;
+    if (!global_credentials_.set_device_type(device_type))
+    {
+        printf("Set Device Type: failed to store credentials.\n");
+        response_code = 0x02;
+        return;
+    }
+
+    printf("Device Type updated: %s\n", device_type_value == 0x01 ? "radio" : "wired");
+    response_code = 0x01;
+
+}
+
+// valve count is stored as integer value, not char
+void CaBswEsp32::command_setNumberOfValves(const uint8_t* data, const uint16_t len, uint8_t & response_code)
+{
+    if (data == nullptr || len < 1)
+    {
+        printf("Set Number Of Valves: invalid payload.\n");
+        response_code = 0x02;
+        return;
+    }
+
+    uint32_t valve_count = 0;
+    if (len >= 4)
+    {
+        valve_count = static_cast<uint32_t>(data[0]) |
+                      (static_cast<uint32_t>(data[1]) << 8) |
+                      (static_cast<uint32_t>(data[2]) << 16) |
+                      (static_cast<uint32_t>(data[3]) << 24);
+    }
+    else
+    {
+        valve_count = static_cast<uint32_t>(data[0]);
+    }
+
+    if (valve_count == 0)
+    {
+        printf("Set Number Of Valves: value 0 is invalid.\n");
+        response_code = 0x02;
+        return;
+    }
+
+    if (!global_credentials_.set_valve_count(valve_count))
+    {
+        printf("Set Number Of Valves: failed to store credentials.\n");
+        response_code = 0x02;
+        return;
+    }
+
+    printf("Valve Count updated: %lu\n", static_cast<unsigned long>(valve_count));
+    response_code = 0x01;
+}
+
+    
+   
 } // namespace command_addapter

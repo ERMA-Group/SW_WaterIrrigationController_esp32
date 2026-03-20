@@ -1,6 +1,9 @@
 # 1. Define the libraries
 add_library(SW_APP STATIC 
     application.cpp 
+    ${CMAKE_CURRENT_SOURCE_DIR}/cloud/webservice_api.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cloud/device_claim_client.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cloud/server_sync_client.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/asw_cfg/global_credentials.cpp
 
     # Command Adapters
@@ -30,6 +33,12 @@ target_include_directories(SW_APP PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/command_handling
 )
 
+if(DEFINED IDF_PATH)
+    target_include_directories(SW_APP PUBLIC "${IDF_PATH}/components/json/cJSON")
+    target_include_directories(SW_APP PUBLIC "${IDF_PATH}/components/mbedtls/esp_crt_bundle/include")
+    target_include_directories(SW_APP PUBLIC "${IDF_PATH}/components/mbedtls/mbedtls/include")
+endif()
+
 target_include_directories(M_BSW_ESP32_Cfg PUBLIC 
     "bsw_cfg"
     ${BSW_INC_PATH}
@@ -40,6 +49,7 @@ target_include_directories(M_BSW_ESP32_Cfg PUBLIC
 target_link_libraries(M_BSW_ESP32_Cfg PUBLIC __idf_M_BSW_ESP32 idf::driver)
 target_link_libraries(SW_APP PUBLIC 
     __idf_M_BSW_ESP32 
+    __idf_json
     M_ShiftRegister
     M_ESTP
     M_BSW_ESP32_Cfg 

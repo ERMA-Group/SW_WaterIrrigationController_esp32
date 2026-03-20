@@ -9,6 +9,13 @@
 #pragma once
 #include <cstdint>
 #include <array>
+#include <atomic>
+#include <string>
+
+extern "C" {
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+}
 #include "scheduler.hpp"
 #include "scheduler_task.hpp"
 #include "gpio.hpp"
@@ -22,16 +29,13 @@
 #include "global_credentials.hpp"
 #include "time.hpp"
 #include "shift_register.hpp"
+#include "cloud/server_sync_client.hpp"
 
 #include "ca_bsw_esp32.hpp"
 
 namespace app {
 
 class Application {
-    constexpr static uint16_t kMajorVersion {1} ;
-    constexpr static uint16_t kMinorVersion {0} ;
-    constexpr static uint16_t kPatchVersion {1} ;
-
     // configTICK_RATE_HZ has to be 1000!!!
     static constexpr uint16_t kSchedulerPeriodUs {1000}; // 1 ms tick
 
@@ -57,6 +61,15 @@ public:
     void task64ms(void);
     void task128ms(void);
     void c2task10ms(void);
+
+    /* LED indicator states */
+    enum class LedIndicatorState {
+        kResetMode,          ///< Fast blink - AP setup mode
+        kWifiConnectMode,    ///< Slow blink - connecting to Wi-Fi
+        kServerPairingMode,  ///< 3:1 high:low - pairing to backend over connected Wi-Fi
+        kConnected,          ///< Solid on - Wi-Fi connected and paired
+    };
+    LedIndicatorState current_led_state_ = LedIndicatorState::kResetMode;
 
     /* Tasks */
     bsw::SchedulerTask _task_blink_led;
@@ -87,8 +100,15 @@ private:
     std::array<uint8_t, 1024> uart_rx_buffer_;
     bool uart_initialized_ = false;
     bool setup_mode_active_ = false;
+    std::atomic<bool> paired_confirmed_ {false};
+    bool server_tasks_allowed_ = true;
     bool reset_button_prev_pressed_ = false;
     uint64_t reset_button_pressed_since_ms_ = 0;
+    uint32_t valve_count_ = 8;
+    std::array<bool, app::sld_cfg::kSldNumberOfOutputs> valve_open_states_{};
+    std::array<uint64_t, app::sld_cfg::kSldNumberOfOutputs> valve_close_deadlines_us_{};
+    std::string device_hw_id_;
+    cloud::ServerSyncClient server_sync_client_;
 
     bsw::Wifi wifi_;
     app::GlobalCredentials global_credentials_;
@@ -97,7 +117,22 @@ private:
 
     bool isResetButtonPressed() const;
     void serviceResetButton();
+    void serviceManualRuns();
     void runWifiStartupFlow();
+    void startServerCommunicationTasks();
+
+    static void cloudManualRunCb(void* context, uint32_t valve_index, uint32_t duration_sec);
+    static void cloudStopRunCb(void* context, uint32_t valve_index);
+    static void cloudRestartCb(void* context);
+    static void cloudFactoryResetCb(void* context);
+    static void cloudUpdateCb(void* context, const char* firmware_url);
+    static void cloudSyncOkCb(void* context);
+    void handleManualRunCommand(uint32_t valve_index, uint32_t duration_sec);
+    void handleStopRunCommand(uint32_t valve_index);
+
+    DeviceType getDeviceType() const;
+    void openValve(uint16_t valve_index);
+    void closeValve(uint16_t valve_index);
 
     command_addapter::CaBswEsp32 ca_bswEsp32_{uart, ota_, wifi_, global_credentials_};
 };

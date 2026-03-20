@@ -16,3 +16,18 @@ project(SW_WaterIrrigationContoller)
 add_subdirectory(src)
 add_subdirectory(M_ESTP)
 add_subdirectory(M_ShiftRegister)
+
+set(APP_ELF_TARGET "${CMAKE_PROJECT_NAME}.elf")
+if(TARGET ${APP_ELF_TARGET})
+    add_custom_command(
+        TARGET ${APP_ELF_TARGET}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -DBUILD_VERSION_FILE=${CMAKE_SOURCE_DIR}/src/asw_cfg/build_version.hpp
+            -P ${CMAKE_SOURCE_DIR}/tools/increment_build_version.cmake
+        COMMENT "Increment build version after successful app link"
+        VERBATIM
+    )
+else()
+    message(WARNING "App target ${APP_ELF_TARGET} not found. Build version auto-increment disabled.")
+endif()

@@ -2,7 +2,7 @@ idf_component_register(SRCS "main.cpp"
                        REQUIRES 
                        spi_flash 
                        driver esp_wifi 
-                       esp_event nvs_flash 
+                       esp_event nvs_flash json
                        M_BSW_ESP32
                        INCLUDE_DIRS ""
                        #EMBED_TXTFILES "server_pubkey.pem"
