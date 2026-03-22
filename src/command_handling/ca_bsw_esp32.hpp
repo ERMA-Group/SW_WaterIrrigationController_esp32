@@ -36,6 +36,7 @@ public:
         dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_readDeviceData>(kStartId + 0x0004, this);
         dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_setDeviceType>(kStartId + 0x0005, this);
         dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_setNumberOfValves>(kStartId + 0x0006, this);
+        dispatcher.subscribe<CaBswEsp32, &CaBswEsp32::command_setPollingInterval>(kStartId + 0x0007, this);
     }
 
     void command_testData(const uint8_t* data, const uint16_t len, uint8_t & response_code);
@@ -46,6 +47,7 @@ public:
     void command_readDeviceData(const uint8_t* data, const uint16_t len, uint8_t & response_code);
     void command_setDeviceType(const uint8_t* data, const uint16_t len, uint8_t & response_code);
     void command_setNumberOfValves(const uint8_t* data, const uint16_t len, uint8_t & response_code);
+    void command_setPollingInterval(const uint8_t* data, const uint16_t len, uint8_t & response_code);
 
 private:
     bsw::Uart& uart_;

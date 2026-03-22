@@ -6,8 +6,11 @@
 
 extern "C" {
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 }
+
+struct cJSON;
 
 namespace app::cloud {
 
@@ -23,42 +26,48 @@ struct CommandHandlers {
 
 class ServerSyncClient {
 public:
-    ServerSyncClient() = default;
-    ~ServerSyncClient() = default;
+    ServerSyncClient();
+    ~ServerSyncClient();
 
-    void configure(const char* sync_url, const char* sse_url_base, uint32_t sync_period_ms);
+    void configure(const char* sync_url, const char* poll_url_base, uint32_t sync_period_ms);
     void setCommandHandlers(const CommandHandlers& handlers);
     void setDeviceHwId(const std::string& hw_id);
     void setFirmwareVersion(const std::string& fw_version);
+    void setValveConnectionType(const std::string& connection_type);
     void setValveCount(uint32_t valve_count);
     void setValveState(uint32_t valve_index, bool is_open);
     void start();
 
 private:
-    static constexpr uint32_t kDefaultSyncPeriodMs {60000};
+    static constexpr uint32_t kDefaultSyncPeriodMs {5000};
+    static constexpr uint32_t kPollFailureBackoffMs {3000};
+    static constexpr size_t kMaxLoggedPayloadBytes {256};
     static const char* kDefaultSyncUrl;
-    static const char* kDefaultSseUrlBase;
+    static const char* kDefaultPollUrlBase;
 
     std::string sync_url_ {kDefaultSyncUrl};
-    std::string sse_url_base_ {kDefaultSseUrlBase};
+    std::string poll_url_base_ {kDefaultPollUrlBase};
     uint32_t sync_period_ms_ {kDefaultSyncPeriodMs};
 
     std::string device_hw_id_;
     std::string firmware_version_ {"0.0.0"};
+    std::string valve_connection_type_ {"Wired"};
     std::vector<bool> valve_states_ {false};
     CommandHandlers command_handlers_;
+    SemaphoreHandle_t state_mutex_ = nullptr;
 
     TaskHandle_t sync_task_handle_ = nullptr;
-    TaskHandle_t sse_task_handle_ = nullptr;
+    TaskHandle_t poll_task_handle_ = nullptr;
 
     static void syncTaskEntry(void* arg);
-    static void sseTaskEntry(void* arg);
+    static void pollTaskEntry(void* arg);
     void syncTaskLoop();
-    void sseTaskLoop();
+    void pollTaskLoop();
 
     bool postDeviceSync();
-    void processSseLine(const std::string& line, bool& is_command_event);
-    void handleSseCommandJson(const std::string& json_text);
+    bool pollCommandsOnce();
+    bool handlePollResponse(const std::string& json_text);
+    void handleCommandJson(cJSON* json);
 };
 
 } // namespace app::cloud

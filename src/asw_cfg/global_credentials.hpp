@@ -7,12 +7,20 @@
 
 #include <string>
 
+#include "bsw_cfg.hpp"
+
 namespace app {
 
 enum class DeviceType
 {
     Wired,
     Wireless
+};
+
+enum class OperatingMode
+{
+    Standard = 0,
+    PureMqtt = 1,
 };
 
 class GlobalCredentials final {
@@ -22,7 +30,9 @@ public:
         std::string device_password;
         std::string pairing_pin;
         DeviceType device_type;
-        uint32_t valve_count = 8;
+        uint32_t valve_count = app::sld_cfg::kNumberOfWiredOutputs;
+        OperatingMode operating_mode = OperatingMode::Standard;
+        uint32_t sync_period_ms = 60000;
     };
 
     GlobalCredentials() = default;
@@ -43,6 +53,10 @@ public:
     DeviceType get_device_type() const;
     bool set_valve_count(uint32_t valve_count);
     uint32_t get_valve_count() const;
+    bool set_operating_mode(OperatingMode mode);
+    OperatingMode get_operating_mode() const;
+    bool set_sync_period_ms(uint32_t sync_period_ms);
+    uint32_t get_sync_period_ms() const;
 
 
     static bool get_pairing_pin_cb(void* context, std::string& out_pin);
@@ -55,6 +69,8 @@ private:
     static constexpr const char* kKeyPairingPin = "pairing_pin";
     static constexpr const char* kKeyDeviceType = "device_type";
     static constexpr const char* kKeyValveCount = "valve_count";
+    static constexpr const char* kKeySyncPeriodMs = "sync_period_ms";
+    static constexpr const char* kKeyOperatingMode = "op_mode";
 
     Credentials cache_{};
 

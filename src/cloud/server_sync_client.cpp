@@ -1,5 +1,6 @@
 #include "cloud/server_sync_client.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "freertos/idf_additions.h"
@@ -7,22 +8,132 @@
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+
+#include "cloud/webservice_api.hpp"
 
 namespace app::cloud {
 
-const char* ServerSyncClient::kDefaultSyncUrl = "https://aqua.erma.sk/api/device_sync.php";
-const char* ServerSyncClient::kDefaultSseUrlBase = "https://aqua.erma.sk/api/commands.php?hw_id=";
+namespace {
 
-void ServerSyncClient::configure(const char* sync_url, const char* sse_url_base, uint32_t sync_period_ms)
+std::string get_reset_reason_text()
+{
+    switch (esp_reset_reason())
+    {
+        case ESP_RST_POWERON: return "Power On";
+        case ESP_RST_EXT: return "External";
+        case ESP_RST_SW: return "Software";
+        case ESP_RST_PANIC: return "Panic";
+        case ESP_RST_INT_WDT: return "Interrupt WDT";
+        case ESP_RST_TASK_WDT: return "Task WDT";
+        case ESP_RST_WDT: return "WDT";
+        case ESP_RST_DEEPSLEEP: return "Deep Sleep";
+        case ESP_RST_BROWNOUT: return "Brownout";
+        case ESP_RST_SDIO: return "SDIO";
+        default: return "Unknown";
+    }
+}
+
+std::string get_wifi_ssid()
+{
+    wifi_ap_record_t ap_info = {};
+    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK)
+    {
+        return "";
+    }
+
+    const char* ssid = reinterpret_cast<const char*>(ap_info.ssid);
+    const size_t ssid_len = strnlen(ssid, sizeof(ap_info.ssid));
+    return std::string(ssid, ssid_len);
+}
+
+int get_wifi_rssi()
+{
+    wifi_ap_record_t ap_info = {};
+    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK)
+    {
+        return 0;
+    }
+    return static_cast<int>(ap_info.rssi);
+}
+
+std::string get_ip_address()
+{
+    esp_netif_t* sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta_netif == nullptr)
+    {
+        return "";
+    }
+
+    esp_netif_ip_info_t ip_info = {};
+    if (esp_netif_get_ip_info(sta_netif, &ip_info) != ESP_OK)
+    {
+        return "";
+    }
+
+    char ip_buf[16] = {0};
+    std::snprintf(ip_buf,
+                  sizeof(ip_buf),
+                  "%u.%u.%u.%u",
+                  static_cast<unsigned int>(ip4_addr1(&ip_info.ip)),
+                  static_cast<unsigned int>(ip4_addr2(&ip_info.ip)),
+                  static_cast<unsigned int>(ip4_addr3(&ip_info.ip)),
+                  static_cast<unsigned int>(ip4_addr4(&ip_info.ip)));
+    return std::string(ip_buf);
+}
+
+std::string get_mac_address()
+{
+    uint8_t mac[6] = {0};
+    if (esp_wifi_get_mac(WIFI_IF_STA, mac) != ESP_OK)
+    {
+        return "";
+    }
+
+    char mac_buf[18] = {0};
+    std::snprintf(mac_buf,
+                  sizeof(mac_buf),
+                  "%02X:%02X:%02X:%02X:%02X:%02X",
+                  mac[0],
+                  mac[1],
+                  mac[2],
+                  mac[3],
+                  mac[4],
+                  mac[5]);
+    return std::string(mac_buf);
+}
+
+} // namespace
+
+const char* ServerSyncClient::kDefaultSyncUrl = "https://aqua.erma.sk/api/device_sync.php";
+const char* ServerSyncClient::kDefaultPollUrlBase = "https://aqua.erma.sk/api/commands.php?hw_id=";
+
+ServerSyncClient::ServerSyncClient()
+{
+    state_mutex_ = xSemaphoreCreateMutex();
+}
+
+ServerSyncClient::~ServerSyncClient()
+{
+    if (state_mutex_ != nullptr)
+    {
+        vSemaphoreDelete(state_mutex_);
+        state_mutex_ = nullptr;
+    }
+}
+
+void ServerSyncClient::configure(const char* sync_url, const char* poll_url_base, uint32_t sync_period_ms)
 {
     if (sync_url != nullptr && sync_url[0] != '\0')
     {
         sync_url_ = sync_url;
     }
-    if (sse_url_base != nullptr && sse_url_base[0] != '\0')
+    if (poll_url_base != nullptr && poll_url_base[0] != '\0')
     {
-        sse_url_base_ = sse_url_base;
+        poll_url_base_ = poll_url_base;
     }
     if (sync_period_ms != 0U)
     {
@@ -45,30 +156,63 @@ void ServerSyncClient::setFirmwareVersion(const std::string& fw_version)
     firmware_version_ = fw_version.empty() ? "0.0.0" : fw_version;
 }
 
+void ServerSyncClient::setValveConnectionType(const std::string& connection_type)
+{
+    if (connection_type.empty())
+    {
+        return;
+    }
+    valve_connection_type_ = connection_type;
+}
+
 void ServerSyncClient::setValveCount(uint32_t valve_count)
 {
     if (valve_count == 0U)
     {
         valve_count = 1U;
     }
+    if (state_mutex_ != nullptr)
+    {
+        xSemaphoreTake(state_mutex_, portMAX_DELAY);
+    }
     valve_states_.assign(static_cast<size_t>(valve_count), false);
+    if (state_mutex_ != nullptr)
+    {
+        xSemaphoreGive(state_mutex_);
+    }
 }
 
 void ServerSyncClient::setValveState(uint32_t valve_index, bool is_open)
 {
+    if (state_mutex_ != nullptr)
+    {
+        xSemaphoreTake(state_mutex_, portMAX_DELAY);
+    }
     const size_t index = static_cast<size_t>(valve_index);
     if (index >= valve_states_.size())
     {
+        if (state_mutex_ != nullptr)
+        {
+            xSemaphoreGive(state_mutex_);
+        }
         return;
     }
     valve_states_[index] = is_open;
+    if (state_mutex_ != nullptr)
+    {
+        xSemaphoreGive(state_mutex_);
+    }
 }
 
 void ServerSyncClient::start()
 {
+    printf("server_sync start: hw_id='%s' sync_period_ms=%lu\n",
+           device_hw_id_.c_str(),
+           static_cast<unsigned long>(sync_period_ms_));
+
     if (sync_task_handle_ == nullptr)
     {
-        xTaskCreatePinnedToCore(
+        const BaseType_t rc = xTaskCreatePinnedToCore(
             &ServerSyncClient::syncTaskEntry,
             "device_sync",
             8192,
@@ -76,18 +220,44 @@ void ServerSyncClient::start()
             4,
             &sync_task_handle_,
             1);
+        if (rc != pdPASS)
+        {
+            sync_task_handle_ = nullptr;
+            printf("server_sync: failed to create sync task\n");
+        }
+        else
+        {
+            printf("server_sync: sync task created handle=%p\n", static_cast<void*>(sync_task_handle_));
+        }
+    }
+    else
+    {
+        printf("server_sync: sync task already running handle=%p\n", static_cast<void*>(sync_task_handle_));
     }
 
-    if (sse_task_handle_ == nullptr)
+    if (poll_task_handle_ == nullptr)
     {
-        xTaskCreatePinnedToCore(
-            &ServerSyncClient::sseTaskEntry,
-            "device_sse",
+        const BaseType_t rc = xTaskCreatePinnedToCore(
+            &ServerSyncClient::pollTaskEntry,
+            "device_poll",
             10240,
             this,
             4,
-            &sse_task_handle_,
+            &poll_task_handle_,
             0);
+        if (rc != pdPASS)
+        {
+            poll_task_handle_ = nullptr;
+            printf("server_sync: failed to create poll task\n");
+        }
+        else
+        {
+            printf("server_sync: poll task created handle=%p\n", static_cast<void*>(poll_task_handle_));
+        }
+    }
+    else
+    {
+        printf("server_sync: poll task already running handle=%p\n", static_cast<void*>(poll_task_handle_));
     }
 }
 
@@ -101,12 +271,13 @@ void ServerSyncClient::syncTaskEntry(void* arg)
     vTaskDelete(nullptr);
 }
 
-void ServerSyncClient::sseTaskEntry(void* arg)
+void ServerSyncClient::pollTaskEntry(void* arg)
 {
+    printf("commands_poll entry arg=%p\n", arg);
     auto* self = static_cast<ServerSyncClient*>(arg);
     if (self != nullptr)
     {
-        self->sseTaskLoop();
+        self->pollTaskLoop();
     }
     vTaskDelete(nullptr);
 }
@@ -135,19 +306,36 @@ bool ServerSyncClient::postDeviceSync()
     cJSON_AddStringToObject(root, "status", "Online");
     cJSON_AddStringToObject(root, "system_health", "OK");
     cJSON_AddStringToObject(root, "fw_version", firmware_version_.c_str());
+    cJSON_AddStringToObject(root, "wifi_ssid", get_wifi_ssid().c_str());
+    cJSON_AddNumberToObject(root, "wifi_signal", get_wifi_rssi());
+    cJSON_AddStringToObject(root, "ip_address", get_ip_address().c_str());
+    cJSON_AddStringToObject(root, "mac_address", get_mac_address().c_str());
+    cJSON_AddStringToObject(root, "reset_reason", get_reset_reason_text().c_str());
+
+    std::vector<bool> valve_states_snapshot;
+    if (state_mutex_ != nullptr)
+    {
+        xSemaphoreTake(state_mutex_, portMAX_DELAY);
+    }
+    valve_states_snapshot = valve_states_;
+    if (state_mutex_ != nullptr)
+    {
+        xSemaphoreGive(state_mutex_);
+    }
 
     cJSON* valves = cJSON_AddArrayToObject(root, "valves_telemetry");
-    for (size_t i = 0; i < valve_states_.size(); ++i)
+    for (size_t i = 0; i < valve_states_snapshot.size(); ++i)
     {
         cJSON* valve = cJSON_CreateObject();
         cJSON_AddNumberToObject(valve, "id", static_cast<double>(i));
-        cJSON_AddStringToObject(valve, "status", valve_states_[i] ? "open" : "closed");
+        cJSON_AddStringToObject(valve, "status", valve_states_snapshot[i] ? "open" : "closed");
         cJSON_AddNumberToObject(valve, "battery", 100);
         cJSON_AddNumberToObject(valve, "signal", 5);
+        cJSON_AddStringToObject(valve, "type", valve_connection_type_.c_str());
         cJSON_AddItemToArray(valves, valve);
     }
 
-    printf("device_sync telemetry valves=%lu\n", static_cast<unsigned long>(valve_states_.size()));
+    printf("device_sync telemetry valves=%lu\n", static_cast<unsigned long>(valve_states_snapshot.size()));
 
     char* body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -263,150 +451,220 @@ bool ServerSyncClient::postDeviceSync()
     return true;
 }
 
-void ServerSyncClient::sseTaskLoop()
+void ServerSyncClient::pollTaskLoop()
 {
+    printf("commands_poll task started\n");
+    printf("commands_poll interval ms=%lu\n", static_cast<unsigned long>(sync_period_ms_));
+    uint32_t poll_tick = 0U;
+
     while (true)
     {
         if (device_hw_id_.empty())
         {
+            printf("commands_poll waiting: device_hw_id is empty\n");
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        std::string url = sse_url_base_ + device_hw_id_;
+        ++poll_tick;
+        const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
+        printf("commands_poll tick=%lu uptime_ms=%llu\n",
+               static_cast<unsigned long>(poll_tick),
+               static_cast<unsigned long long>(now_ms));
 
-        esp_http_client_config_t cfg = {};
-        cfg.url = url.c_str();
-        cfg.method = HTTP_METHOD_GET;
-        cfg.timeout_ms = 45000;
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
-
-        esp_http_client_handle_t client = esp_http_client_init(&cfg);
-        if (client == nullptr)
+        if (!pollCommandsOnce())
         {
-            vTaskDelay(pdMS_TO_TICKS(1500));
-            continue;
+            printf("commands_poll retry in %lu ms\n", static_cast<unsigned long>(kPollFailureBackoffMs));
+            vTaskDelay(pdMS_TO_TICKS(kPollFailureBackoffMs));
         }
-
-        esp_http_client_set_header(client, "Accept", "text/event-stream");
-        esp_http_client_set_header(client, "Cache-Control", "no-cache");
-
-        if (esp_http_client_open(client, 0) != ESP_OK)
+        else
         {
-            esp_http_client_cleanup(client);
-            vTaskDelay(pdMS_TO_TICKS(1500));
-            continue;
+            // Long-poll protocol: immediately issue next request after server closes connection.
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
-
-        if (esp_http_client_fetch_headers(client) < 0)
-        {
-            esp_http_client_close(client);
-            esp_http_client_cleanup(client);
-            vTaskDelay(pdMS_TO_TICKS(1500));
-            continue;
-        }
-
-        std::string line_buffer;
-        bool is_command_event = false;
-        char chunk[256];
-
-        while (true)
-        {
-            int r = esp_http_client_read(client, chunk, sizeof(chunk));
-            if (r <= 0)
-            {
-                break;
-            }
-
-            for (int i = 0; i < r; ++i)
-            {
-                char c = chunk[i];
-                if (c == '\r')
-                {
-                    continue;
-                }
-                if (c == '\n')
-                {
-                    processSseLine(line_buffer, is_command_event);
-                    line_buffer.clear();
-                }
-                else
-                {
-                    line_buffer.push_back(c);
-                }
-            }
-        }
-
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
-void ServerSyncClient::processSseLine(const std::string& line, bool& is_command_event)
+bool ServerSyncClient::pollCommandsOnce()
 {
-    if (line.empty())
+    if (device_hw_id_.empty())
     {
-        is_command_event = false;
-        return;
+        return false;
     }
 
-    if (line.rfind("event:", 0) == 0)
+    std::string response;
+    const std::string poll_url = poll_url_base_ + device_hw_id_;
+    printf("commands_poll request: %s\n", poll_url.c_str());
+    const auto result = WebServiceApi::GetJson(poll_url, response, 30000);
+    if (!WebServiceApi::IsSuccess(result))
     {
-        const std::string event_name = line.substr(6);
-        is_command_event = (event_name.find("command") != std::string::npos);
-        return;
+        printf("commands_poll failed: %s\n", WebServiceApi::ResultToString(result));
+        return false;
     }
 
-    if (line.rfind("data:", 0) == 0 && is_command_event)
+        const size_t preview_len = (response.size() > kMaxLoggedPayloadBytes) ? kMaxLoggedPayloadBytes : response.size();
+        printf("commands_poll response bytes=%lu preview='%.*s'%s\n",
+            static_cast<unsigned long>(response.size()),
+            static_cast<int>(preview_len),
+            response.c_str(),
+            response.size() > preview_len ? "..." : "");
+
+    if (response.empty())
     {
-        std::string payload = line.substr(5);
-        while (!payload.empty() && payload.front() == ' ')
-        {
-            payload.erase(payload.begin());
-        }
-        handleSseCommandJson(payload);
+        printf("commands_poll: empty response (no commands)\n");
+        return true;
     }
+
+    return handlePollResponse(response);
 }
 
-void ServerSyncClient::handleSseCommandJson(const std::string& json_text)
+bool ServerSyncClient::handlePollResponse(const std::string& json_text)
 {
+    const size_t preview_len = (json_text.size() > kMaxLoggedPayloadBytes) ? kMaxLoggedPayloadBytes : json_text.size();
+    printf("commands_poll parsing bytes=%lu preview='%.*s'%s\n",
+           static_cast<unsigned long>(json_text.size()),
+           static_cast<int>(preview_len),
+           json_text.c_str(),
+           json_text.size() > preview_len ? "..." : "");
     cJSON* json = cJSON_Parse(json_text.c_str());
     if (json == nullptr)
     {
-        printf("SSE command parse failed: %s\n", json_text.c_str());
+        printf("commands_poll parse failed: %s\n", json_text.c_str());
+        return false;
+    }
+
+    if (cJSON_IsObject(json))
+    {
+        cJSON* status = cJSON_GetObjectItem(json, "status");
+        if (cJSON_IsString(status) && status->valuestring != nullptr)
+        {
+            if (std::strcmp(status->valuestring, "no_commands") == 0)
+            {
+                cJSON_Delete(json);
+                return true;
+            }
+
+            if (std::strcmp(status->valuestring, "success") == 0)
+            {
+                cJSON* commands = cJSON_GetObjectItem(json, "commands");
+                if (cJSON_IsArray(commands))
+                {
+                    const int command_count = cJSON_GetArraySize(commands);
+                    for (int i = 0; i < command_count; ++i)
+                    {
+                        cJSON* command = cJSON_GetArrayItem(commands, i);
+                        if (!cJSON_IsObject(command))
+                        {
+                            continue;
+                        }
+
+                        handleCommandJson(command);
+                    }
+                }
+
+                cJSON_Delete(json);
+                return true;
+            }
+        }
+
+        if (cJSON_GetObjectItem(json, "action") != nullptr)
+        {
+            handleCommandJson(json);
+            cJSON_Delete(json);
+            return true;
+        }
+    }
+
+    cJSON_Delete(json);
+    return false;
+}
+
+void ServerSyncClient::handleCommandJson(cJSON* json)
+{
+    if (json == nullptr)
+    {
         return;
     }
 
     cJSON* action = cJSON_GetObjectItem(json, "action");
     if (!cJSON_IsString(action) || action->valuestring == nullptr)
     {
-        cJSON_Delete(json);
         return;
     }
 
-    printf("SSE action received: %s\n", action->valuestring);
+    printf("command action received: %s\n", action->valuestring);
+
+    auto map_valve_id_to_index = [this](uint32_t raw_valve_id, uint32_t& out_index) -> bool {
+        const uint32_t valve_count = static_cast<uint32_t>(valve_states_.size());
+        if (valve_count == 0U)
+        {
+            return false;
+        }
+
+        // Protocol uses hardware output index (0-based): 0,1,2...
+        if (raw_valve_id < valve_count)
+        {
+            out_index = raw_valve_id;
+            return true;
+        }
+
+        return false;
+    };
 
     if (std::strcmp(action->valuestring, "manual_run") == 0)
     {
         cJSON* valve_index = cJSON_GetObjectItem(json, "valve_id");
+        if (!cJSON_IsNumber(valve_index))
+        {
+            valve_index = cJSON_GetObjectItem(json, "valve_index");
+        }
         cJSON* duration = cJSON_GetObjectItem(json, "duration_sec");
         if (cJSON_IsNumber(valve_index) && cJSON_IsNumber(duration) && command_handlers_.manual_run != nullptr)
         {
+            const uint32_t raw_id = static_cast<uint32_t>(valve_index->valuedouble);
+            uint32_t mapped_index = 0U;
+            if (!map_valve_id_to_index(raw_id, mapped_index))
+            {
+                printf("manual_run rejected: valve id/index %lu out of range (valves=%lu)\n",
+                       static_cast<unsigned long>(raw_id),
+                       static_cast<unsigned long>(valve_states_.size()));
+                return;
+            }
+
+            printf("manual_run mapped valve id/index %lu -> index %lu\n",
+                   static_cast<unsigned long>(raw_id),
+                   static_cast<unsigned long>(mapped_index));
             command_handlers_.manual_run(
                 command_handlers_.context,
-                static_cast<uint32_t>(valve_index->valuedouble),
+                mapped_index,
                 static_cast<uint32_t>(duration->valuedouble));
         }
     }
     else if (std::strcmp(action->valuestring, "stop_run") == 0)
     {
         cJSON* valve_index = cJSON_GetObjectItem(json, "valve_id");
+        if (!cJSON_IsNumber(valve_index))
+        {
+            valve_index = cJSON_GetObjectItem(json, "valve_index");
+        }
         if (cJSON_IsNumber(valve_index) && command_handlers_.stop_run != nullptr)
         {
+            const uint32_t raw_id = static_cast<uint32_t>(valve_index->valuedouble);
+            uint32_t mapped_index = 0U;
+            if (!map_valve_id_to_index(raw_id, mapped_index))
+            {
+                printf("stop_run rejected: valve id/index %lu out of range (valves=%lu)\n",
+                       static_cast<unsigned long>(raw_id),
+                       static_cast<unsigned long>(valve_states_.size()));
+                return;
+            }
+
+            printf("stop_run mapped valve id/index %lu -> index %lu\n",
+                   static_cast<unsigned long>(raw_id),
+                   static_cast<unsigned long>(mapped_index));
             command_handlers_.stop_run(
                 command_handlers_.context,
-                static_cast<uint32_t>(valve_index->valuedouble));
+                mapped_index);
         }
     }
     else if (std::strcmp(action->valuestring, "restart") == 0)
@@ -418,7 +676,7 @@ void ServerSyncClient::handleSseCommandJson(const std::string& json_text)
     }
     else if (std::strcmp(action->valuestring, "factory_reset") == 0)
     {
-        printf("SSE factory_reset command accepted.\n");
+        printf("factory_reset command accepted.\n");
         if (command_handlers_.factory_reset != nullptr)
         {
             command_handlers_.factory_reset(command_handlers_.context);
@@ -426,14 +684,17 @@ void ServerSyncClient::handleSseCommandJson(const std::string& json_text)
     }
     else if (std::strcmp(action->valuestring, "update") == 0)
     {
-        cJSON* fw = cJSON_GetObjectItem(json, "firmware_url");
-        if (cJSON_IsString(fw) && fw->valuestring != nullptr && command_handlers_.update != nullptr)
+        if (command_handlers_.update != nullptr)
         {
-            command_handlers_.update(command_handlers_.context, fw->valuestring);
+            cJSON* fw = cJSON_GetObjectItem(json, "firmware_url");
+            const char* url_from_server = nullptr;
+            if (cJSON_IsString(fw) && fw->valuestring != nullptr)
+            {
+                url_from_server = fw->valuestring;
+            }
+            command_handlers_.update(command_handlers_.context, url_from_server);
         }
     }
-
-    cJSON_Delete(json);
 }
 
 } // namespace app::cloud

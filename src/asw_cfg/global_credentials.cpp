@@ -10,10 +10,28 @@
 #include "esp_mac.h"
 #include "esp_random.h"
 #include "nvram.hpp"
+#include "bsw_cfg.hpp"
 
 namespace app {
 
 namespace {
+
+constexpr uint32_t kDefaultSyncPeriodMs = 60000U;
+constexpr uint32_t kMinSyncPeriodMs = 5000U;
+constexpr uint32_t kMaxSyncPeriodMs = 600000U;
+
+uint32_t clamp_sync_period_ms(uint32_t value)
+{
+    if (value < kMinSyncPeriodMs)
+    {
+        return kMinSyncPeriodMs;
+    }
+    if (value > kMaxSyncPeriodMs)
+    {
+        return kMaxSyncPeriodMs;
+    }
+    return value;
+}
 
 DeviceType parse_device_type_u8(uint8_t value)
 {
@@ -23,6 +41,16 @@ DeviceType parse_device_type_u8(uint8_t value)
 uint8_t device_type_to_u8(DeviceType value)
 {
     return (value == DeviceType::Wireless) ? 1U : 0U;
+}
+
+OperatingMode parse_operating_mode_u8(uint8_t value)
+{
+    return (value == static_cast<uint8_t>(OperatingMode::PureMqtt)) ? OperatingMode::PureMqtt : OperatingMode::Standard;
+}
+
+uint8_t operating_mode_to_u8(OperatingMode value)
+{
+    return static_cast<uint8_t>(value);
 }
 
 } // namespace
@@ -39,7 +67,9 @@ bool GlobalCredentials::load_from_nvs()
     cache_.device_password = nvs.get_string(kKeyDevicePassword);
     cache_.pairing_pin = nvs.get_string(kKeyPairingPin);
     cache_.device_type = parse_device_type_u8(nvs.get_value<uint8_t>(kKeyDeviceType, 0U));
-    cache_.valve_count = nvs.get_value<uint32_t>(kKeyValveCount, 8U);
+    cache_.valve_count = nvs.get_value<uint32_t>(kKeyValveCount, app::sld_cfg::kNumberOfWiredOutputs);
+    cache_.operating_mode = parse_operating_mode_u8(nvs.get_value<uint8_t>(kKeyOperatingMode, static_cast<uint8_t>(OperatingMode::Standard)));
+    cache_.sync_period_ms = nvs.get_value<uint32_t>(kKeySyncPeriodMs, kDefaultSyncPeriodMs);
     nvs.close();
     return true;
 }
@@ -57,6 +87,8 @@ bool GlobalCredentials::save_to_nvs()
     ok = ok && (nvs.set_string(kKeyPairingPin, cache_.pairing_pin) == ESP_OK);
     ok = ok && (nvs.set_value<uint8_t>(kKeyDeviceType, device_type_to_u8(cache_.device_type)) == ESP_OK);
     ok = ok && (nvs.set_value<uint32_t>(kKeyValveCount, cache_.valve_count) == ESP_OK);
+    ok = ok && (nvs.set_value<uint8_t>(kKeyOperatingMode, operating_mode_to_u8(cache_.operating_mode)) == ESP_OK);
+    ok = ok && (nvs.set_value<uint32_t>(kKeySyncPeriodMs, cache_.sync_period_ms) == ESP_OK);
     nvs.close();
     return ok;
 }
@@ -114,7 +146,13 @@ bool GlobalCredentials::ensure_loaded()
     }
     if (cache_.valve_count == 0U)
     {
-        cache_.valve_count = 8U;
+        cache_.valve_count = app::sld_cfg::kNumberOfWiredOutputs;
+        changed = true;
+    }
+    const uint32_t clamped_sync_period_ms = clamp_sync_period_ms(cache_.sync_period_ms);
+    if (clamped_sync_period_ms != cache_.sync_period_ms)
+    {
+        cache_.sync_period_ms = clamped_sync_period_ms;
         changed = true;
     }
 
@@ -262,6 +300,38 @@ DeviceType GlobalCredentials::get_device_type() const
 uint32_t GlobalCredentials::get_valve_count() const
 {
     return cache_.valve_count;
+}
+
+bool GlobalCredentials::set_operating_mode(OperatingMode mode)
+{
+    if (!ensure_loaded())
+    {
+        return false;
+    }
+
+    cache_.operating_mode = mode;
+    return save_to_nvs();
+}
+
+OperatingMode GlobalCredentials::get_operating_mode() const
+{
+    return cache_.operating_mode;
+}
+
+bool GlobalCredentials::set_sync_period_ms(uint32_t sync_period_ms)
+{
+    if (!ensure_loaded())
+    {
+        return false;
+    }
+
+    cache_.sync_period_ms = clamp_sync_period_ms(sync_period_ms);
+    return save_to_nvs();
+}
+
+uint32_t GlobalCredentials::get_sync_period_ms() const
+{
+    return cache_.sync_period_ms;
 }
 
 

@@ -3,7 +3,7 @@
 This document outlines how an ESP32 (running ESP-IDF) should communicate with the backend server. The system relies on **three main pillars**:
 1. **Device Provisioning & Pairing** (Device ID + Password on label)
 2. **Periodic Telemetry Sync** (every 30-60 seconds)
-3. **Real-time Server-Sent Events (SSE)** (Instant commands)
+3. **Real-time Long Polling** (Instant manual commands)
 
 ## 1. Device Identity & Pairing
 
@@ -24,7 +24,7 @@ The ESP32 firmware **MUST** include a field for a 6-digit PIN on its local capti
 4. The ESP32 immediately makes a one-time HTTP POST request to `/api/device_claim.php` with the payload:
    `{ "hw_id": "ERMA-001", "pin": "XRB9L2" }`
 5. The server validates the PIN against the active 10-minute web claims. If successful, the server permanently binds the device to the user's account and returns `{ "status": "success" }`.
-6. Only after receiving `success` should the ESP32 begin its normal Pillar 2 (Telemetry) and Pillar 3 (SSE) loops.
+6. Only after receiving `success` should the ESP32 begin its normal Pillar 2 (Telemetry) and Pillar 3 (Long Polling) loops.
 
 ---
 
@@ -41,12 +41,30 @@ The ESP32 must report its physical state and retrieve its scheduled programming 
   "status": "Online",
   "system_health": "OK",
   "fw_version": "1.2.3",
+  "wifi_ssid": "MyHomeWiFi",
+  "wifi_signal": -65,
+  "ip_address": "192.168.1.50",
+  "mac_address": "AA:BB:CC:DD:EE:FF",
+  "reset_reason": "Power On",
   "valves_telemetry": [
     {"id": 0, "status": "closed", "battery": 100, "signal": 5, "type": "Radio"},
     {"id": 1, "status": "open", "battery": 95, "signal": 4, "type": "Wired"}
   ]
 }
 ```
+
+**Telemetry Fields:**
+- `hw_id`: Unique hardware identifier (on label).
+- `status`: Device state (e.g., `Online`, `Idle`, `Watering`).
+- `system_health`: Overall diagnostic status (`OK`, `Warning`, `Error`).
+- `fw_version`: Current firmware string.
+- `wifi_ssid`: Connected network name.
+- `wifi_signal`: RSSI in dBm (e.g., `-65`).
+- `ip_address`: Local network IP.
+- `mac_address`: Device physical MAC address.
+- `reset_reason`: Why the device last rebooted.
+- `valves_telemetry`: Array of connected hardware outputs.
+
 
 **How Valves are Discovered:**
 The ESP32 does not need to formally "register" its valves. Simply include them using their hardware **integer output index** (`0`, `1`, `2`...) in the `valves_telemetry` array. The server will:
@@ -83,83 +101,64 @@ The ESP32 does not need to formally "register" its valves. Simply include them u
 
 ---
 
-## 3. Real-time Commands (`commands.php`)
+## 3. Real-time Commands (`commands.php`) via Long Polling
 
-To support instant manual watering triggers without waiting for the 60-second telemetry polling, the ESP32 must maintain a continuous Server-Sent Events (SSE) connection.
+To support instant manual watering triggers without waiting for the 60-second telemetry polling, the ESP32 should use a **Long Polling** mechanism. Unlike a permanent stream, the device makes a standard HTTP request, and the server waits (up to 20 seconds) for a command before responding and closing the connection.
 
 **Endpoint:** `GET https://aqua.erma.sk/api/commands.php?hw_id=ERMA-1234`
 
-### How SSE Works
-SSE is just a standard HTTP GET request that the server never closes. The server sends standard text lines starting with `event:` and `data:`, followed by a blank line `\n\n`.
+### How Long Polling Works
+1. The ESP32 sends a standard HTTP GET request to `/api/commands.php?hw_id=...`.
+2. The server receives the request and checks the database for any pending (`sent=0`) commands.
+3. If no command is found, the server **waits** (e.g., 20 seconds), checking the DB every 250ms.
+4. If a command appears, the server returns it immediately (JSON array) and closes the connection.
+5. If 20 seconds pass with no command, the server returns `{"status":"no_commands"}` and closes the connection.
+6. **Important**: As soon as the connection closes (either via a command or a timeout), the ESP32 should **immediately** start a new request to wait for the next command.
 
-**Example Server Stream:**
-```text
-event: connected
-data: {"status":"connected","hw_id":"ERMA-1234","server_time":1710931200}
-
-event: ping
-data: {"server_time":1710931215}
-
-event: command
-data: {"action":"manual_run","valve_id":0,"duration_sec":300,"run_until":"2026-03-20 15:30:00"}
-
-event: command
-data: {"action":"stop_run","valve_id":0}
-
-event: command
-data: {"action":"restart"}
-
-event: command
-data: {"action":"factory_reset"}
-
-event: command
-data: {"action":"update","firmware_url":"https://aqua.erma.sk/firmware.bin"}
+**Example Response (Command Found):**
+```json
+{
+  "status": "success",
+  "commands": [
+    { "action": "manual_run", "valve_id": 1, "duration_sec": 300 }
+  ]
+}
 ```
 
-### Supported SSE Commands
-The server will push these JSON payloads into `data:` under `event: command`:
+**Example Response (Timeout / No Commands):**
+```json
+{
+  "status": "no_commands"
+}
+```
+
+**Connection Resilience:**
+If the HTTP request fails due to Wi-Fi drop, the ESP32 should wait 2-5 seconds and retry the polling request. This ensures the system is self-healing.
+
+### Supported Commands
+The server will return these JSON objects inside the `commands` array:
 1. **Manual Run:** `{"action":"manual_run", "valve_id":0, "duration_sec":300, "run_until":"Y-m-d H:i:s"}` -> The ESP32 should instantly open valve `0` and set a hardware timer to close it after `duration_sec` seconds.
 2. **Stop Run:** `{"action":"stop_run", "valve_id":0}` -> The ESP32 should instantly close valve `0` and abort its running manual timer.
 3. **Restart:** `{"action":"restart"}` -> The ESP32 should cleanly reboot (`esp_restart()`).
 4. **Factory Reset:** `{"action":"factory_reset"}` -> The ESP32 should clear its Non-Volatile Storage (forgetting saved Wi-Fi credentials) and then reboot. Note: This is actively triggered by the server when the user unbinds the device.
-5. **Firmware Update:** `{"action":"update", "firmware_url":"..."}` -> The ESP32 should start an OTA update using the provided URL.
-
-### ESP32 ESP-IDF Implementation Guide for SSE
-
-1. **Create the HTTP Client:**
-   Initialize `esp_http_client_config_t` pointing to `commands.php?hw_id=<your_device_id>`.
-   Set `is_async = false` and `timeout_ms = 30000` (or higher, since the connection is kept alive).
-
-2. **Open the Connection:**
-   Call `esp_http_client_open()` to initiate the request.
-   Call `esp_http_client_fetch_headers()` to read the `200 OK` response headers.
-
-3. **Read the Stream in a Loop:**
-   Create a loop using `esp_http_client_read()`. 
-   Read chunks of text into a local buffer line-by-line looking for `\n`.
-
-4. **Parsing the Stream:**
-   - If the line starts with `event: command`, prepare to execute the next data line.
-   - If the line starts with `data: `, parse the JSON payload remaining on that line.
-   - Example parsing logic:
-     ```c
-     if (strncmp(line, "data: ", 6) == 0) {
-         cJSON *json = cJSON_Parse(line + 6);
-         if (json) {
-             cJSON *action = cJSON_GetObjectItem(json, "action");
-             if (action && strcmp(action->valuestring, "manual_run") == 0) {
-                 // Open the specified valve for the specified duration immediately!
-             }
-             cJSON_Delete(json);
-         }
-     }
-     ```
-
-5. **Heartbeats and Reconnection:**
-   The server sends an `event: ping` every 15 seconds. 
-   If `esp_http_client_read()` blocks for more than 45 seconds without receiving any data, assume the TCP connection dropped (e.g. Wi-Fi loss, NAT timeout), close the client, and immediately try to reconnect in an infinite fallback loop.
+5. **Firmware Update:** `{"action":"update"}` -> The ESP32 should start an OTA update using its locally stored firmware URL.
 
 ## Summary Architecture
 
 * **Task 1 (Sync Task):** Wakes every 60s -> HTTP POST to `device_sync.php` -> Downloads broad schedule -> Sleeps.
-* **Task 2 (SSE Task):** Infinite loop -> HTTP GET to `commands.php` -> Blocks on read -> Instantly fires callbacks when `event: command` arrives -> Reconnects if read fails.
+* **Task 2 (Command Task):** Infinite loop -> HTTP GET to `commands.php` (Long Polling) -> Blocks on read -> Instantly executes commands if any arrive -> Immediately re-polls.
+
+---
+
+## Factory Reset & Re-pairing
+
+If a device is factory reset (internal state cleared, Wi-Fi lost), it will return to **Setup Mode** (AP).
+
+1. The device remains "Bound" to the user's account on the server.
+2. To re-connect it, the user must follow the standard **Pairing Flow** again.
+3. The server allows re-pairing a device that is already bound to the *same* user (it will generate a fresh PIN).
+4. Once the device receives the new PIN through its setup page, it performs the `device_claim.php` handshake.
+5. After a successful claim, the server returns `{"status": "success"}` and the device can resume normal sync operations.
+
+**Security Note:** If a device is reset but the user *doesn't* initiate a new pairing, the device will stay in AP mode and won't be able to sync data until the owner re-validates the connection via a new PIN. This prevents unauthorized access if a device is physically reset by a third party.
+

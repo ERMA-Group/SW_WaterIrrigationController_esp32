@@ -29,6 +29,7 @@ extern "C" {
 #include "global_credentials.hpp"
 #include "time.hpp"
 #include "shift_register.hpp"
+#include "cloud/home_assistant_mqtt_bridge.hpp"
 #include "cloud/server_sync_client.hpp"
 
 #include "ca_bsw_esp32.hpp"
@@ -99,16 +100,19 @@ private:
     command_addapter::CommManager<128, 1024> comm_manager_;
     std::array<uint8_t, 1024> uart_rx_buffer_;
     bool uart_initialized_ = false;
-    bool setup_mode_active_ = false;
+    std::atomic<bool> setup_mode_active_ {false};
     std::atomic<bool> paired_confirmed_ {false};
     bool server_tasks_allowed_ = true;
     bool reset_button_prev_pressed_ = false;
     uint64_t reset_button_pressed_since_ms_ = 0;
-    uint32_t valve_count_ = 8;
-    std::array<bool, app::sld_cfg::kSldNumberOfOutputs> valve_open_states_{};
-    std::array<uint64_t, app::sld_cfg::kSldNumberOfOutputs> valve_close_deadlines_us_{};
+    uint32_t valve_count_ = app::sld_cfg::kNumberOfWiredOutputs;
+    std::array<bool, app::sld_cfg::kNumberOfWiredOutputs> valve_open_states_{};
+    std::array<uint64_t, app::sld_cfg::kNumberOfWiredOutputs> valve_close_deadlines_us_{};
+    portMUX_TYPE valve_state_lock_ = portMUX_INITIALIZER_UNLOCKED;
     std::string device_hw_id_;
+    uint32_t sync_period_ms_ = 60000U;
     cloud::ServerSyncClient server_sync_client_;
+    cloud::HomeAssistantMqttBridge home_assistant_bridge_;
 
     bsw::Wifi wifi_;
     app::GlobalCredentials global_credentials_;
@@ -120,6 +124,7 @@ private:
     void serviceManualRuns();
     void runWifiStartupFlow();
     void startServerCommunicationTasks();
+    static void lateStartTaskEntry(void* context);
 
     static void cloudManualRunCb(void* context, uint32_t valve_index, uint32_t duration_sec);
     static void cloudStopRunCb(void* context, uint32_t valve_index);
@@ -127,6 +132,7 @@ private:
     static void cloudFactoryResetCb(void* context);
     static void cloudUpdateCb(void* context, const char* firmware_url);
     static void cloudSyncOkCb(void* context);
+    static void haSetValveStateCb(void* context, uint32_t valve_index, bool is_open);
     void handleManualRunCommand(uint32_t valve_index, uint32_t duration_sec);
     void handleStopRunCommand(uint32_t valve_index);
 

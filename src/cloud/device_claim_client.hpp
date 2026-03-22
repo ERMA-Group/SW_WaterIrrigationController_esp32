@@ -14,7 +14,7 @@ namespace app::cloud {
  * 3. User enters PIN into device's setup portal along with Wi-Fi credentials
  * 4. Device calls DeviceClaimClient::Claim() with hw_id and pin
  * 5. Server validates PIN (10-minute validity window) and binds device to user's account
- * 6. Device begins normal telemetry/SSE operations
+ * 6. Device begins normal telemetry/long-poll operations
  */
 class DeviceClaimClient {
 public:

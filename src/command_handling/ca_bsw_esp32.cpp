@@ -216,6 +216,19 @@ void CaBswEsp32::command_readDeviceData(const uint8_t* data, const uint16_t len,
     printf("AP Password: %s\n", ap_password.c_str());
     printf("Device Type: %s\n", global_credentials.device_type == app::DeviceType::Wireless ? "radio" : "wired");
     printf("Valve Count: %u\n", global_credentials.valve_count);
+
+    // print all global setting and wifi settings
+    printf("Global Settings:\n");
+    printf("  Device mode: %s\n", global_credentials.operating_mode == app::OperatingMode::Standard ? "Cloud+HA" : "Home Assistant");
+    printf("  Device ID: %s\n", global_credentials.device_id.c_str());
+    printf("  Device Password: %s\n", global_credentials.device_password.c_str());
+    printf("  Device Type: %s\n", global_credentials.device_type == app::DeviceType::Wireless ? "radio" : "wired");
+    printf("  Valve Count: %u\n", global_credentials.valve_count);
+
+    printf("Wi-Fi Settings:\n");
+    printf("  SSID: %s\n", wifi_.get_ssid().c_str());
+    printf("  Wi-Fi Password: %s\n", wifi_.get_password().c_str());
+
     response_code = 0x01;
 }
 
@@ -290,6 +303,45 @@ void CaBswEsp32::command_setNumberOfValves(const uint8_t* data, const uint16_t l
     response_code = 0x01;
 }
 
+void CaBswEsp32::command_setPollingInterval(const uint8_t* data, const uint16_t len, uint8_t & response_code)
+{
+    if (data == nullptr || len < 1)
+    {
+        printf("Set Polling Interval: invalid payload.\n");
+        response_code = 0x02;
+        return;
+    }
+
+    uint32_t interval_ms = 0;
+    if (len >= 4)
+    {
+        interval_ms = static_cast<uint32_t>(data[0]) |
+                      (static_cast<uint32_t>(data[1]) << 8) |
+                      (static_cast<uint32_t>(data[2]) << 16) |
+                      (static_cast<uint32_t>(data[3]) << 24);
+    }
+    else
+    {
+        interval_ms = static_cast<uint32_t>(data[0]);
+    }
+    interval_ms *= 1000; // Convert seconds to milliseconds
+    if (interval_ms < 1000)
+    {
+        printf("Set Polling Interval: value %lu ms is too low, minimum is 1000 ms.\n", static_cast<unsigned long>(interval_ms));
+        response_code = 0x02;
+        return;
+    }
+
+    if (!global_credentials_.set_sync_period_ms(interval_ms))
+    {
+        printf("Set Polling Interval: failed to store credentials.\n");
+        response_code = 0x02;
+        return;
+    }
+
+    printf("Polling Interval updated: %lu ms\n", static_cast<unsigned long>(interval_ms));
+    response_code = 0x01;
+}
     
    
 } // namespace command_addapter

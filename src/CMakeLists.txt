@@ -4,7 +4,10 @@ add_library(SW_APP STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cloud/webservice_api.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/cloud/device_claim_client.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/cloud/server_sync_client.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cloud/home_assistant_mqtt_bridge.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/asw_cfg/global_credentials.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/asw_cfg/mqtt_runtime_config.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/asw_cfg/operating_mode_config.cpp
 
     # Command Adapters
     ${CMAKE_CURRENT_SOURCE_DIR}/command_handling/ca_bsw_esp32.cpp
@@ -50,6 +53,7 @@ target_link_libraries(M_BSW_ESP32_Cfg PUBLIC __idf_M_BSW_ESP32 idf::driver)
 target_link_libraries(SW_APP PUBLIC 
     __idf_M_BSW_ESP32 
     __idf_json
+    __idf_mqtt
     M_ShiftRegister
     M_ESTP
     M_BSW_ESP32_Cfg 

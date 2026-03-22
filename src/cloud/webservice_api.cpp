@@ -30,22 +30,35 @@ WebServiceApi::Result WebServiceApi::PostJson(const std::string& url, const std:
     }
 
     esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, body.c_str(), body.length());
-
-    esp_err_t err = esp_http_client_perform(client);
+    esp_err_t err = esp_http_client_open(client, static_cast<int>(body.length()));
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "PostJson: HTTP error: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "PostJson: open failed: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         return Result::kNetworkError;
     }
 
-    int status = esp_http_client_get_status_code(client);
-    int content_length = esp_http_client_get_content_length(client);
+    int written = 0;
+    while (written < static_cast<int>(body.length()))
+    {
+        const int w = esp_http_client_write(client, body.c_str() + written, static_cast<int>(body.length()) - written);
+        if (w <= 0)
+        {
+            ESP_LOGE(TAG, "PostJson: write failed");
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return Result::kNetworkError;
+        }
+        written += w;
+    }
+
+    int content_length = esp_http_client_fetch_headers(client);
     if (content_length < 0)
     {
         content_length = 0;
     }
+
+    int status = esp_http_client_get_status_code(client);
 
     response.clear();
     response.reserve(static_cast<size_t>(content_length + 256));
@@ -61,6 +74,7 @@ WebServiceApi::Result WebServiceApi::PostJson(const std::string& url, const std:
         response.append(buffer, static_cast<size_t>(read));
     }
 
+    esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
     if (status != 200)
@@ -96,20 +110,21 @@ WebServiceApi::Result WebServiceApi::GetJson(const std::string& url, std::string
 
     esp_http_client_set_header(client, "Accept", "application/json");
 
-    esp_err_t err = esp_http_client_perform(client);
+    esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "GetJson: HTTP error: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "GetJson: open failed: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         return Result::kNetworkError;
     }
 
-    int status = esp_http_client_get_status_code(client);
-    int content_length = esp_http_client_get_content_length(client);
+    int content_length = esp_http_client_fetch_headers(client);
     if (content_length < 0)
     {
         content_length = 0;
     }
+
+    int status = esp_http_client_get_status_code(client);
 
     response.clear();
     response.reserve(static_cast<size_t>(content_length + 256));
@@ -125,6 +140,7 @@ WebServiceApi::Result WebServiceApi::GetJson(const std::string& url, std::string
         response.append(buffer, static_cast<size_t>(read));
     }
 
+    esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
     if (status != 200)

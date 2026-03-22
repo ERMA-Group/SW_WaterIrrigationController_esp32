@@ -13,13 +13,18 @@
 #include <cstdio>
 #include <cstring>
 
+#include "asw_cfg/home_assistant_cfg.hpp"
+
 extern "C" {
 #include "application.h"
+#include "freertos/idf_additions.h"
 }
 
 namespace app {
 
 namespace {
+
+constexpr const char* kDefaultOtaUrl = "http://www.erma.sk/fw/SW_WaterIrrigationController_esp32.bin";
 
 std::string composeFirmwareVersion()
 {
@@ -166,13 +171,38 @@ void Application::start()
         printf("Failed to start LED board scheduler\n");
         return;
     }
-    lateStart();
+
+    TaskHandle_t late_start_task = nullptr;
+    const BaseType_t late_start_rc = xTaskCreatePinnedToCore(
+        &Application::lateStartTaskEntry,
+        "late_start",
+        8192,
+        this,
+        3,
+        &late_start_task,
+        1);
+    if (late_start_rc != pdPASS)
+    {
+        printf("Failed to start late_start task. Restarting.\n");
+        esp_restart();
+    }
+
     while (true)
     {
         serviceResetButton();
         serviceManualRuns();
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+}
+
+void Application::lateStartTaskEntry(void* context)
+{
+    auto* self = static_cast<Application*>(context);
+    if (self != nullptr)
+    {
+        self->lateStart();
+    }
+    vTaskDelete(nullptr);
 }
 
 void Application::earlyStart()
@@ -185,6 +215,20 @@ void Application::earlyStart()
         if (!global_credentials_.set_pairing_pin(pairing_pin))
         {
             printf("Failed to persist pairing PIN from provisioning portal.\n");
+        }
+    });
+
+    wifi_.set_operating_mode_callback([this](const std::string& mode_text) {
+        const OperatingMode mode =
+            (mode_text == "home_assistant" || mode_text == "pure_mqtt") ? OperatingMode::PureMqtt : OperatingMode::Standard;
+
+        if (!global_credentials_.set_operating_mode(mode))
+        {
+            printf("Failed to persist operating mode.\n");
+        }
+        if (mode == OperatingMode::PureMqtt)
+        {
+            global_credentials_.set_pairing_pin("");
         }
     });
 
@@ -228,6 +272,12 @@ void Application::lateStart()
 {
     // Wi-Fi provisioning/connection can block; run it only after both schedulers are active.
     runWifiStartupFlow();
+    const bool wifi_connected = wifi_.is_connected();
+    printf("lateStart: wifi_connected=%s\n", wifi_connected ? "true" : "false");
+    if (!wifi_connected)
+    {
+        printf("lateStart: starting server tasks anyway; clients will retry until Wi-Fi is available.\n");
+    }
     startServerCommunicationTasks();
 }
 
@@ -278,7 +328,7 @@ void Application::task64ms(void)
 uint8_t output_data = 1;
 void Application::task128ms(void)
 {
-    bool in_setup_mode = setup_mode_active_;
+    bool in_setup_mode = setup_mode_active_.load();
     bool wifi_connected = wifi_.is_connected();
     bool is_paired = paired_confirmed_.load();
     
@@ -376,14 +426,12 @@ void Application::serviceResetButton()
         const uint64_t held_ms = now_ms - reset_button_pressed_since_ms_;
         if (held_ms >= kResetHoldTimeMs)
         {
-            printf("Reset button held > %lu ms. Clearing Wi-Fi credentials and starting provisioning AP.\n",
+            printf("Reset button held > %lu ms. Clearing Wi-Fi credentials and rebooting to setup mode.\n",
                    static_cast<unsigned long>(kResetHoldTimeMs));
             wifi_.clear_wifi_credentials();
-            setup_mode_active_ = true;
-            wifi_.start_provisioning_portal_blocking();
-            setup_mode_active_ = false;
-            reset_button_prev_pressed_ = false;
-            reset_button_pressed_since_ms_ = 0;
+            global_credentials_.set_pairing_pin("");
+            paired_confirmed_.store(false);
+            esp_restart();
         }
     }
     else
@@ -396,14 +444,18 @@ void Application::serviceResetButton()
 void Application::serviceManualRuns()
 {
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
-    const uint32_t max_valves = (valve_count_ <= app::sld_cfg::kSldNumberOfOutputs) ? valve_count_ : app::sld_cfg::kSldNumberOfOutputs;
+    const uint32_t max_valves = (valve_count_ <= app::sld_cfg::kNumberOfWiredOutputs) ? valve_count_ : app::sld_cfg::kNumberOfWiredOutputs;
     for (uint32_t i = 0; i < max_valves; ++i)
     {
-        if (!valve_open_states_[i])
+        bool should_close = false;
+        taskENTER_CRITICAL(&valve_state_lock_);
+        if (valve_open_states_[i] && now_us >= valve_close_deadlines_us_[i])
         {
-            continue;
+            should_close = true;
         }
-        if (now_us < valve_close_deadlines_us_[i])
+        taskEXIT_CRITICAL(&valve_state_lock_);
+
+        if (!should_close)
         {
             continue;
         }
@@ -418,84 +470,148 @@ void Application::runWifiStartupFlow()
     wifi_.initialize();
     paired_confirmed_.store(false);
     server_tasks_allowed_ = true;
-
-    if (!wifi_.has_wifi_credentials())
-    {
-        printf("No stored Wi-Fi credentials. Starting provisioning AP.\n");
-        setup_mode_active_ = true;
-        wifi_.start_provisioning_portal_blocking();
-        setup_mode_active_ = false;
-        return;
-    }
-
-    if (!wifi_.connect_from_nvram(kWifiMaxConnectAttempts))
-    {
-        printf("Wi-Fi connection failed after %u attempts. Restarting device.\n", kWifiMaxConnectAttempts);
-        esp_restart();
-    }
-
     app::GlobalCredentials::Credentials credentials{};
+    // This call also loads the operating mode into the credentials struct
     if (global_credentials_.get(credentials))
     {
         device_hw_id_ = credentials.device_id;
         valve_count_ = credentials.valve_count;
         if (valve_count_ == 0U)
         {
-            valve_count_ = app::sld_cfg::kSldNumberOfOutputs;
+            valve_count_ = app::sld_cfg::kNumberOfWiredOutputs;
         }
-        if (valve_count_ > app::sld_cfg::kSldNumberOfOutputs)
+        if (valve_count_ > app::sld_cfg::kNumberOfWiredOutputs)
         {
-            valve_count_ = app::sld_cfg::kSldNumberOfOutputs;
+            valve_count_ = app::sld_cfg::kNumberOfWiredOutputs;
         }
+        sync_period_ms_ = credentials.sync_period_ms;
+        printf("Configured mode: %s\n", credentials.operating_mode == OperatingMode::PureMqtt ? "Home Assistant" : "Cloud+HA");
     }
     else
     {
         device_hw_id_ = "UNKNOWN";
-        valve_count_ = app::sld_cfg::kSldNumberOfOutputs;
+        valve_count_ = app::sld_cfg::kNumberOfWiredOutputs;
+        sync_period_ms_ = 60000U;
+    }
+
+    const bool has_wifi_credentials = wifi_.has_wifi_credentials();
+    if (!has_wifi_credentials)
+    {
+        printf("No stored Wi-Fi credentials. Starting provisioning AP.\n");
+        setup_mode_active_.store(true);
+        wifi_.start_provisioning_portal_blocking();
+        setup_mode_active_.store(false);
+        return;
+    }
+
+    if (!wifi_.connect_from_nvram(kWifiMaxConnectAttempts))
+    {
+        printf("Wi-Fi connection failed after %u attempts. Starting provisioning AP for recovery.\n", kWifiMaxConnectAttempts);
+        setup_mode_active_.store(true);
+        wifi_.start_provisioning_portal_blocking();
+        setup_mode_active_.store(false);
+        return;
+    }
+
+    if (credentials.operating_mode == OperatingMode::PureMqtt)
+    {
+        paired_confirmed_.store(true);
+        server_tasks_allowed_ = true;
+        printf("Startup mode: Pure MQTT. Skipping cloud pairing claim.\n");
+        return;
     }
 
     std::string pairing_pin;
-    if (global_credentials_.consume_pairing_pin(pairing_pin) && !pairing_pin.empty() && !device_hw_id_.empty())
+    if (global_credentials_.get_pairing_pin(pairing_pin) && !pairing_pin.empty() && !device_hw_id_.empty())
     {
         const auto claim_result = cloud::DeviceClaimClient::Claim(device_hw_id_, pairing_pin);
         printf("device_claim result: %s\n", cloud::DeviceClaimClient::ResultToString(claim_result));
         const bool claim_success =
             (claim_result == cloud::DeviceClaimClient::ClaimResult::kSuccess) ||
             (claim_result == cloud::DeviceClaimClient::ClaimResult::kAlreadyClaimed);
+        if (claim_success)
+        {
+            global_credentials_.set_pairing_pin("");
+        }
         paired_confirmed_.store(claim_success);
         server_tasks_allowed_ = true;
     }
     else
     {
-        paired_confirmed_.store(false);
+        // No pending pairing PIN means there is nothing to claim right now.
+        // Keep Cloud+HA mode operational and avoid indefinite pairing-pending LED state.
+        paired_confirmed_.store(true);
+        printf("No pairing PIN pending. Assuming already paired for Cloud+HA mode.\n");
         server_tasks_allowed_ = true;
     }
 }
 
 void Application::startServerCommunicationTasks()
 {
-    if (!server_tasks_allowed_)
+    app::GlobalCredentials::Credentials credentials{};
+    global_credentials_.get(credentials);
+
+    printf("startServerCommunicationTasks: mode=%s hw_id='%s' sync_period_ms=%lu\n",
+           credentials.operating_mode == OperatingMode::PureMqtt ? "Home Assistant" : "Cloud+HA",
+           device_hw_id_.c_str(),
+           static_cast<unsigned long>(sync_period_ms_));
+
+    const bool cloud_mode_enabled = (credentials.operating_mode != OperatingMode::PureMqtt);
+
+    if (cloud_mode_enabled)
     {
-        printf("Skipping server communication tasks until pairing claim succeeds.\n");
-        return;
+        if (!server_tasks_allowed_)
+        {
+            printf("Skipping server communication tasks until pairing claim succeeds.\n");
+        }
+        else
+        {
+            server_sync_client_.setCommandHandlers({
+                this,
+                &Application::cloudManualRunCb,
+                &Application::cloudStopRunCb,
+                &Application::cloudRestartCb,
+                &Application::cloudFactoryResetCb,
+                &Application::cloudUpdateCb,
+                &Application::cloudSyncOkCb,
+            });
+            server_sync_client_.setDeviceHwId(device_hw_id_);
+            server_sync_client_.setValveConnectionType(getDeviceType() == DeviceType::Wired ? "Wired" : "Radio");
+            server_sync_client_.configure(nullptr, nullptr, sync_period_ms_);
+            server_sync_client_.setValveCount(valve_count_);
+            for (uint32_t i = 0; i < valve_count_; ++i)
+            {
+                server_sync_client_.setValveState(i, valve_open_states_[i]);
+            }
+            printf("startServerCommunicationTasks: invoking server_sync_client_.start()\n");
+            server_sync_client_.start();
+        }
     }
 
-    server_sync_client_.setCommandHandlers({
-        this,
-        &Application::cloudManualRunCb,
-        &Application::cloudStopRunCb,
-        &Application::cloudRestartCb,
-        &Application::cloudFactoryResetCb,
-        &Application::cloudUpdateCb,
-        &Application::cloudSyncOkCb,
-    });
-    server_sync_client_.setDeviceHwId(device_hw_id_);
-    server_sync_client_.setValveCount(valve_count_);
-    for (uint32_t i = 0; i < valve_count_; ++i)
+    home_assistant_bridge_.configure(device_hw_id_, valve_count_);
+    home_assistant_bridge_.setCommandCallback(this, &Application::haSetValveStateCb);
+    const bool ha_started = home_assistant_bridge_.start(app::ha_cfg::kMqttBrokerUri,
+                                                         app::ha_cfg::kMqttUsername,
+                                                         app::ha_cfg::kMqttPassword,
+                                                         app::ha_cfg::kDiscoveryPrefix);
+    if (ha_started)
     {
-        server_sync_client_.setValveState(i, valve_open_states_[i]);
+        for (uint32_t i = 0; i < valve_count_; ++i)
+        {
+            home_assistant_bridge_.publishValveState(i, valve_open_states_[i]);
+        }
     }
-    server_sync_client_.start();
+    else
+    {
+        printf("HA MQTT bridge failed to start. Continuing with current mode tasks.\n");
+    }
+
+    if (!cloud_mode_enabled)
+    {
+        printf("Operating mode is Home Assistant. Cloud sync polling task is intentionally disabled.\n");
+        return;
+    }
+    printf("Operating mode is Standard. Cloud sync and MQTT/HA bridge are enabled.\n");
 }
 
 void Application::cloudManualRunCb(void* context, uint32_t valve_index, uint32_t duration_sec)
@@ -543,12 +659,34 @@ void Application::cloudFactoryResetCb(void* context)
 
 void Application::cloudUpdateCb(void* context, const char* firmware_url)
 {
+    printf("cloudUpdateCb: command received. context=%p firmware_url=%s\n",
+           context,
+           (firmware_url != nullptr && firmware_url[0] != '\0') ? firmware_url : "<empty>");
+
     auto* self = static_cast<Application*>(context);
-    if (self == nullptr || firmware_url == nullptr)
+    if (self == nullptr)
     {
+        printf("cloudUpdateCb: ignored, context is null.\n");
         return;
     }
-    self->ota_.start_update(firmware_url);
+
+    if (firmware_url != nullptr && firmware_url[0] != '\0')
+    {
+        printf("Cloud update command provided firmware_url, but default OTA URL is enforced.\n");
+    }
+
+    printf("cloudUpdateCb: starting OTA with enforced URL: %s\n", kDefaultOtaUrl);
+    const esp_err_t ota_result = self->ota_.start_update(kDefaultOtaUrl);
+    if (ota_result == ESP_OK)
+    {
+        printf("cloudUpdateCb: ota_.start_update returned ESP_OK (device should reboot on successful OTA).\n");
+    }
+    else
+    {
+        printf("cloudUpdateCb: ota_.start_update failed: %s (%ld)\n",
+               esp_err_to_name(ota_result),
+               static_cast<long>(ota_result));
+    }
 }
 
 void Application::cloudSyncOkCb(void* context)
@@ -566,17 +704,37 @@ void Application::cloudSyncOkCb(void* context)
     }
 }
 
+void Application::haSetValveStateCb(void* context, uint32_t valve_index, bool is_open)
+{
+    auto* self = static_cast<Application*>(context);
+    if (self == nullptr)
+    {
+        return;
+    }
+
+    if (is_open)
+    {
+        self->openValve(static_cast<uint16_t>(valve_index));
+    }
+    else
+    {
+        self->closeValve(static_cast<uint16_t>(valve_index));
+    }
+}
+
 void Application::handleManualRunCommand(uint32_t valve_index, uint32_t duration_sec)
 {
-    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kSldNumberOfOutputs)
+    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kNumberOfWiredOutputs)
     {
         printf("Unsupported valve index: %lu\n", static_cast<unsigned long>(valve_index));
         return;
     }
 
     openValve(static_cast<uint16_t>(valve_index));
+    taskENTER_CRITICAL(&valve_state_lock_);
     valve_close_deadlines_us_[valve_index] = static_cast<uint64_t>(esp_timer_get_time()) +
                                              static_cast<uint64_t>(duration_sec) * 1000000ULL;
+    taskEXIT_CRITICAL(&valve_state_lock_);
     printf("Manual run started for valve %lu, duration %u s\n",
            static_cast<unsigned long>(valve_index),
            duration_sec);
@@ -584,7 +742,7 @@ void Application::handleManualRunCommand(uint32_t valve_index, uint32_t duration
 
 void Application::handleStopRunCommand(uint32_t valve_index)
 {
-    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kSldNumberOfOutputs)
+    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kNumberOfWiredOutputs)
     {
         printf("Unsupported valve index: %lu\n", static_cast<unsigned long>(valve_index));
         return;
@@ -601,7 +759,7 @@ DeviceType Application::getDeviceType() const
 
 void Application::openValve(uint16_t valve_index)
 {
-    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kSldNumberOfOutputs)
+    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kNumberOfWiredOutputs)
     {
         printf("openValve: unsupported index %u\n", valve_index);
         return;
@@ -609,10 +767,15 @@ void Application::openValve(uint16_t valve_index)
 
     if (getDeviceType() == DeviceType::Wired)
     {
-        shift_register_.setOutput(0, 1 << valve_index);
+        const uint8_t mask = static_cast<uint8_t>(1U << valve_index);
+        const uint8_t new_state = static_cast<uint8_t>(shift_register_.getData(0) | mask);
+        shift_register_.setOutput(0, new_state);
         shift_register_.updateOutputs();
+        taskENTER_CRITICAL(&valve_state_lock_);
         valve_open_states_[valve_index] = true;
+        taskEXIT_CRITICAL(&valve_state_lock_);
         server_sync_client_.setValveState(valve_index, true);
+        home_assistant_bridge_.publishValveState(valve_index, true);
         printf("Valve %u opened.\n", valve_index);
     }
     else
@@ -623,7 +786,7 @@ void Application::openValve(uint16_t valve_index)
 
 void Application::closeValve(uint16_t valve_index)
 {
-    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kSldNumberOfOutputs)
+    if (valve_index >= valve_count_ || valve_index >= app::sld_cfg::kNumberOfWiredOutputs)
     {
         printf("closeValve: unsupported index %u\n", valve_index);
         return;
@@ -631,13 +794,18 @@ void Application::closeValve(uint16_t valve_index)
 
     if (getDeviceType() == DeviceType::Wired)
     {
-        shift_register_.setOutput(0, shift_register_.getData(0) & ~(1 << valve_index));
+        const uint8_t mask = static_cast<uint8_t>(1U << valve_index);
+        const uint8_t new_state = static_cast<uint8_t>(shift_register_.getData(0) & static_cast<uint8_t>(~mask));
+        shift_register_.setOutput(0, new_state);
         shift_register_.updateOutputs();
     }
 
+    taskENTER_CRITICAL(&valve_state_lock_);
     valve_open_states_[valve_index] = false;
     valve_close_deadlines_us_[valve_index] = 0;
+    taskEXIT_CRITICAL(&valve_state_lock_);
     server_sync_client_.setValveState(valve_index, false);
+    home_assistant_bridge_.publishValveState(valve_index, false);
 }
 
 } // namespace app
