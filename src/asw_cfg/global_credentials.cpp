@@ -17,8 +17,8 @@ namespace app {
 namespace {
 
 constexpr uint32_t kDefaultSyncPeriodMs = 60000U;
-constexpr uint32_t kMinSyncPeriodMs = 5000U;
-constexpr uint32_t kMaxSyncPeriodMs = 600000U;
+constexpr uint32_t kMinSyncPeriodMs = 30000U;
+constexpr uint32_t kMaxSyncPeriodMs = 60000U;
 
 uint32_t clamp_sync_period_ms(uint32_t value)
 {
@@ -69,6 +69,7 @@ bool GlobalCredentials::load_from_nvs()
     cache_.device_type = parse_device_type_u8(nvs.get_value<uint8_t>(kKeyDeviceType, 0U));
     cache_.valve_count = nvs.get_value<uint32_t>(kKeyValveCount, app::sld_cfg::kNumberOfWiredOutputs);
     cache_.operating_mode = parse_operating_mode_u8(nvs.get_value<uint8_t>(kKeyOperatingMode, static_cast<uint8_t>(OperatingMode::Standard)));
+    cache_.local_mode_boot = nvs.get_value<uint8_t>(kKeyLocalModeBoot, 0U) != 0U;
     cache_.sync_period_ms = nvs.get_value<uint32_t>(kKeySyncPeriodMs, kDefaultSyncPeriodMs);
     nvs.close();
     return true;
@@ -88,6 +89,7 @@ bool GlobalCredentials::save_to_nvs()
     ok = ok && (nvs.set_value<uint8_t>(kKeyDeviceType, device_type_to_u8(cache_.device_type)) == ESP_OK);
     ok = ok && (nvs.set_value<uint32_t>(kKeyValveCount, cache_.valve_count) == ESP_OK);
     ok = ok && (nvs.set_value<uint8_t>(kKeyOperatingMode, operating_mode_to_u8(cache_.operating_mode)) == ESP_OK);
+    ok = ok && (nvs.set_value<uint8_t>(kKeyLocalModeBoot, cache_.local_mode_boot ? 1U : 0U) == ESP_OK);
     ok = ok && (nvs.set_value<uint32_t>(kKeySyncPeriodMs, cache_.sync_period_ms) == ESP_OK);
     nvs.close();
     return ok;
@@ -316,6 +318,22 @@ bool GlobalCredentials::set_operating_mode(OperatingMode mode)
 OperatingMode GlobalCredentials::get_operating_mode() const
 {
     return cache_.operating_mode;
+}
+
+bool GlobalCredentials::set_local_mode_boot(bool enabled)
+{
+    if (!ensure_loaded())
+    {
+        return false;
+    }
+
+    cache_.local_mode_boot = enabled;
+    return save_to_nvs();
+}
+
+bool GlobalCredentials::get_local_mode_boot() const
+{
+    return cache_.local_mode_boot;
 }
 
 bool GlobalCredentials::set_sync_period_ms(uint32_t sync_period_ms)

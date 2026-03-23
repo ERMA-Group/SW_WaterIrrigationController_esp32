@@ -5,6 +5,9 @@ add_library(SW_APP STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cloud/device_claim_client.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/cloud/server_sync_client.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/cloud/home_assistant_mqtt_bridge.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/local_mode/local_mode_store.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/local_mode/local_mode_scheduler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/local_mode/local_mode_web.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/asw_cfg/global_credentials.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/asw_cfg/mqtt_runtime_config.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/asw_cfg/operating_mode_config.cpp

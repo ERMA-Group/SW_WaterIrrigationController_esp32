@@ -32,6 +32,7 @@ public:
         DeviceType device_type;
         uint32_t valve_count = app::sld_cfg::kNumberOfWiredOutputs;
         OperatingMode operating_mode = OperatingMode::Standard;
+        bool local_mode_boot = false;
         uint32_t sync_period_ms = 60000;
     };
 
@@ -55,6 +56,8 @@ public:
     uint32_t get_valve_count() const;
     bool set_operating_mode(OperatingMode mode);
     OperatingMode get_operating_mode() const;
+    bool set_local_mode_boot(bool enabled);
+    bool get_local_mode_boot() const;
     bool set_sync_period_ms(uint32_t sync_period_ms);
     uint32_t get_sync_period_ms() const;
 
@@ -71,6 +74,7 @@ private:
     static constexpr const char* kKeyValveCount = "valve_count";
     static constexpr const char* kKeySyncPeriodMs = "sync_period_ms";
     static constexpr const char* kKeyOperatingMode = "op_mode";
+    static constexpr const char* kKeyLocalModeBoot = "local_mode";
 
     Credentials cache_{};
 

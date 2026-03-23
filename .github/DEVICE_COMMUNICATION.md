@@ -71,6 +71,7 @@ The ESP32 does not need to formally "register" its valves. Simply include them u
 - **Auto-create** any new valve it hasn't seen before (named `"Valve 1"`, `"Valve 2"` etc. — the user can rename them from the web dashboard).
 - **Update telemetry** (`battery`, `signal`, `status`) for existing valves on every sync.
 - **Reconcile the list** — any valve in the database that is NOT present in the current `valves_telemetry` payload will be automatically deleted. This means the database always mirrors exactly the hardware outputs the device physically has. If the device has 2 outputs, report 2 entries; if it has 4, report 4.
+- **Status protection** — if the web dashboard has set a valve to `Running` (manually or via scheduler) and its timer has not yet expired, the server ignores the hardware-reported `closed` status and preserves `Running` in the database. Only when the `manual_run_until` timer expires will the hardware's reported status take effect again.
 
 **Response Payload (JSON):**
 ```json
@@ -82,10 +83,12 @@ The ESP32 does not need to formally "register" its valves. Simply include them u
       "id": 0,
       "connection_type": "Wired",
       "operating_mode": "Custom",
-      "use_humidity_sensor": true,
+      "use_humidity_sensor": 1,
       "humidity_threshold": 50,
-      "use_weather_forecast": false,
+      "use_weather_forecast": 0,
       "rain_chance_threshold": 30,
+      "status": "Running",
+      "run_until_unix": 1710931500,
       "programs": [
         {"time": "06:00", "duration": 15}
       ]
@@ -94,10 +97,26 @@ The ESP32 does not need to formally "register" its valves. Simply include them u
 }
 ```
 
-**ESP32 Implementation Notes:**
-- Use `esp_http_client` to send the POST request in a FreeRTOS task.
-- Parse the JSON response using `cJSON`.
-- Download the `config` object and update local watering schedules.
+**Response Fields — valve_commands entries:**
+| Field | Type | Description |
+|---|---|---|
+| `id` | int | Hardware output index (0-based) |
+| `connection_type` | string | `"Wired"` or `"Radio"` |
+| `operating_mode` | string | `"Custom"`, `"AI"`, `"Automatic: Dry"`, etc. |
+| `use_humidity_sensor` | int (0/1) | Skip watering if soil is wet |
+| `humidity_threshold` | int | Soil humidity % threshold |
+| `use_weather_forecast` | int (0/1) | Skip watering if rain forecast |
+| `rain_chance_threshold` | int | Rain chance % threshold |
+| `status` | string | `"Running"` or `"Idle"` — **authoritative server state** |
+| `run_until_unix` | int | Unix epoch when the current run expires. `0` if not running. |
+| `programs` | array | Scheduled watering times: `{"time":"HH:MM", "duration": min}` |
+
+**ESP32 Restore-on-Restart Responsibility:**  
+On every sync response, the ESP32 **must** check each valve's `status` and `run_until_unix`:
+- If `status == "Running"` and `run_until_unix > current_time` → **open the valve** and schedule a hardware timer to close it at `run_until_unix`.
+- If `status == "Idle"` or `run_until_unix <= current_time` → ensure the valve is **closed**.
+
+This guarantees that after an unexpected device restart, all active watering runs are automatically restored within one sync cycle (≤ 60 seconds).
 
 ---
 

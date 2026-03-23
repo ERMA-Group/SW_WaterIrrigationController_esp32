@@ -325,9 +325,9 @@ void CaBswEsp32::command_setPollingInterval(const uint8_t* data, const uint16_t 
         interval_ms = static_cast<uint32_t>(data[0]);
     }
     interval_ms *= 1000; // Convert seconds to milliseconds
-    if (interval_ms < 1000)
+    if (interval_ms < 30000 || interval_ms > 60000)
     {
-        printf("Set Polling Interval: value %lu ms is too low, minimum is 1000 ms.\n", static_cast<unsigned long>(interval_ms));
+        printf("Set Polling Interval: value %lu ms is out of range, expected 30000..60000 ms.\n", static_cast<unsigned long>(interval_ms));
         response_code = 0x02;
         return;
     }

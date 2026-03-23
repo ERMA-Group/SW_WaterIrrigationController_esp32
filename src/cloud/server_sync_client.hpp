@@ -22,6 +22,8 @@ struct CommandHandlers {
     void (*factory_reset)(void* context) = nullptr;
     void (*update)(void* context, const char* firmware_url) = nullptr;
     void (*sync_ok)(void* context) = nullptr;
+    void (*augment_sync_valve_payload)(void* context, uint32_t valve_index, cJSON* valve_payload) = nullptr;
+    void (*sync_valve_command)(void* context, uint32_t valve_index, cJSON* valve_command) = nullptr;
 };
 
 class ServerSyncClient {
@@ -36,10 +38,11 @@ public:
     void setValveConnectionType(const std::string& connection_type);
     void setValveCount(uint32_t valve_count);
     void setValveState(uint32_t valve_index, bool is_open);
+    void requestImmediateSync();
     void start();
 
 private:
-    static constexpr uint32_t kDefaultSyncPeriodMs {5000};
+    static constexpr uint32_t kDefaultSyncPeriodMs {60000};
     static constexpr uint32_t kPollFailureBackoffMs {3000};
     static constexpr size_t kMaxLoggedPayloadBytes {256};
     static const char* kDefaultSyncUrl;
@@ -67,6 +70,8 @@ private:
     bool postDeviceSync();
     bool pollCommandsOnce();
     bool handlePollResponse(const std::string& json_text);
+    bool mapValveIdToIndex(uint32_t raw_valve_id, uint32_t& out_index) const;
+    void applyServerValveState(cJSON* command, uint32_t server_time_unix);
     void handleCommandJson(cJSON* json);
 };
 

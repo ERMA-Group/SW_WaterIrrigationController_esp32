@@ -25,14 +25,33 @@ std::string trim_copy(const std::string& input)
     return std::string(first, last);
 }
 
+bool is_valid_pairing_pin(const std::string& pin)
+{
+    if (pin.size() != 6)
+    {
+        return false;
+    }
+
+    for (char ch : pin)
+    {
+        const unsigned char u = static_cast<unsigned char>(ch);
+        if (std::isalnum(u) == 0)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 } // namespace
 
 DeviceClaimClient::ClaimResult DeviceClaimClient::Claim(
     const std::string& hw_id, const std::string& pin, const std::string& server_url)
 {
-    if (hw_id.empty() || pin.empty())
+    if (hw_id.empty() || pin.empty() || !is_valid_pairing_pin(pin))
     {
-        ESP_LOGE(TAG, "Claim: Invalid hw_id or pin");
+        ESP_LOGE(TAG, "Claim: Invalid hw_id or pin format");
         return ClaimResult::kInvalidParam;
     }
 

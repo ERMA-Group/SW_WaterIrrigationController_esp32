@@ -204,6 +204,14 @@ void ServerSyncClient::setValveState(uint32_t valve_index, bool is_open)
     }
 }
 
+void ServerSyncClient::requestImmediateSync()
+{
+    if (sync_task_handle_ != nullptr)
+    {
+        xTaskNotifyGive(sync_task_handle_);
+    }
+}
+
 void ServerSyncClient::start()
 {
     printf("server_sync start: hw_id='%s' sync_period_ms=%lu\n",
@@ -290,7 +298,9 @@ void ServerSyncClient::syncTaskLoop()
         {
             printf("device_sync failed (will retry)\n");
         }
-        vTaskDelay(pdMS_TO_TICKS(sync_period_ms_));
+
+        // Wake early when requestImmediateSync() notifies this task.
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(sync_period_ms_));
     }
 }
 
@@ -332,6 +342,12 @@ bool ServerSyncClient::postDeviceSync()
         cJSON_AddNumberToObject(valve, "battery", 100);
         cJSON_AddNumberToObject(valve, "signal", 5);
         cJSON_AddStringToObject(valve, "type", valve_connection_type_.c_str());
+        if (command_handlers_.augment_sync_valve_payload != nullptr)
+        {
+            command_handlers_.augment_sync_valve_payload(command_handlers_.context,
+                                                         static_cast<uint32_t>(i),
+                                                         valve);
+        }
         cJSON_AddItemToArray(valves, valve);
     }
 
@@ -418,6 +434,13 @@ bool ServerSyncClient::postDeviceSync()
         return true;
     }
 
+    uint32_t server_time_unix = 0U;
+    cJSON* server_time = cJSON_GetObjectItem(resp_json, "server_time");
+    if (cJSON_IsNumber(server_time) && server_time->valuedouble > 0)
+    {
+        server_time_unix = static_cast<uint32_t>(server_time->valuedouble);
+    }
+
     cJSON* valve_commands = cJSON_GetObjectItem(resp_json, "valve_commands");
     if (valve_commands != nullptr && cJSON_IsArray(valve_commands))
     {
@@ -437,6 +460,20 @@ bool ServerSyncClient::postDeviceSync()
                 printf("valve %lu mode from cloud: %s\n",
                        static_cast<unsigned long>(valve_id->valuedouble),
                        operating_mode->valuestring);
+            }
+
+            applyServerValveState(command, server_time_unix);
+
+            if (cJSON_IsNumber(valve_id) && command_handlers_.sync_valve_command != nullptr)
+            {
+                const uint32_t raw_id = static_cast<uint32_t>(valve_id->valuedouble);
+                uint32_t mapped_index = 0U;
+                if (mapValveIdToIndex(raw_id, mapped_index))
+                {
+                    command_handlers_.sync_valve_command(command_handlers_.context,
+                                                         mapped_index,
+                                                         command);
+                }
             }
         }
     }
@@ -579,6 +616,92 @@ bool ServerSyncClient::handlePollResponse(const std::string& json_text)
     return false;
 }
 
+bool ServerSyncClient::mapValveIdToIndex(uint32_t raw_valve_id, uint32_t& out_index) const
+{
+    uint32_t valve_count = 0U;
+    if (state_mutex_ != nullptr)
+    {
+        xSemaphoreTake(state_mutex_, portMAX_DELAY);
+    }
+    valve_count = static_cast<uint32_t>(valve_states_.size());
+    if (state_mutex_ != nullptr)
+    {
+        xSemaphoreGive(state_mutex_);
+    }
+
+    if (valve_count == 0U)
+    {
+        return false;
+    }
+
+    if (raw_valve_id < valve_count)
+    {
+        out_index = raw_valve_id;
+        return true;
+    }
+
+    return false;
+}
+
+void ServerSyncClient::applyServerValveState(cJSON* command, uint32_t server_time_unix)
+{
+    if (!cJSON_IsObject(command))
+    {
+        return;
+    }
+
+    cJSON* valve_id = cJSON_GetObjectItem(command, "id");
+    cJSON* status = cJSON_GetObjectItem(command, "status");
+    cJSON* run_until_unix = cJSON_GetObjectItem(command, "run_until_unix");
+    if (!cJSON_IsNumber(valve_id) || !cJSON_IsString(status) || status->valuestring == nullptr)
+    {
+        return;
+    }
+
+    const uint32_t raw_id = static_cast<uint32_t>(valve_id->valuedouble);
+    uint32_t mapped_index = 0U;
+    if (!mapValveIdToIndex(raw_id, mapped_index))
+    {
+        return;
+    }
+
+    const uint32_t run_until = (cJSON_IsNumber(run_until_unix) && run_until_unix->valuedouble > 0)
+                                 ? static_cast<uint32_t>(run_until_unix->valuedouble)
+                                 : 0U;
+
+    if (std::strcmp(status->valuestring, "Running") == 0)
+    {
+        if (server_time_unix == 0U)
+        {
+            printf("device_sync warning: server_time missing, skipping restore for valve %lu\n",
+                   static_cast<unsigned long>(mapped_index));
+            return;
+        }
+
+        if (run_until > server_time_unix)
+        {
+            const uint32_t duration_sec = run_until - server_time_unix;
+            if (command_handlers_.manual_run != nullptr)
+            {
+                command_handlers_.manual_run(command_handlers_.context, mapped_index, duration_sec);
+            }
+        }
+        else if (command_handlers_.stop_run != nullptr)
+        {
+            command_handlers_.stop_run(command_handlers_.context, mapped_index);
+        }
+        return;
+    }
+
+    if (std::strcmp(status->valuestring, "Idle") == 0)
+    {
+        if (command_handlers_.stop_run != nullptr)
+        {
+            command_handlers_.stop_run(command_handlers_.context, mapped_index);
+        }
+    }
+}
+
 void ServerSyncClient::handleCommandJson(cJSON* json)
 {
     if (json == nullptr)
@@ -594,23 +717,6 @@ void ServerSyncClient::handleCommandJson(cJSON* json)
 
     printf("command action received: %s\n", action->valuestring);
 
-    auto map_valve_id_to_index = [this](uint32_t raw_valve_id, uint32_t& out_index) -> bool {
-        const uint32_t valve_count = static_cast<uint32_t>(valve_states_.size());
-        if (valve_count == 0U)
-        {
-            return false;
-        }
-
-        // Protocol uses hardware output index (0-based): 0,1,2...
-        if (raw_valve_id < valve_count)
-        {
-            out_index = raw_valve_id;
-            return true;
-        }
-
-        return false;
-    };
-
     if (std::strcmp(action->valuestring, "manual_run") == 0)
     {
         cJSON* valve_index = cJSON_GetObjectItem(json, "valve_id");
@@ -623,7 +729,7 @@ void ServerSyncClient::handleCommandJson(cJSON* json)
         {
             const uint32_t raw_id = static_cast<uint32_t>(valve_index->valuedouble);
             uint32_t mapped_index = 0U;
-            if (!map_valve_id_to_index(raw_id, mapped_index))
+            if (!mapValveIdToIndex(raw_id, mapped_index))
             {
                 printf("manual_run rejected: valve id/index %lu out of range (valves=%lu)\n",
                        static_cast<unsigned long>(raw_id),
@@ -651,7 +757,7 @@ void ServerSyncClient::handleCommandJson(cJSON* json)
         {
             const uint32_t raw_id = static_cast<uint32_t>(valve_index->valuedouble);
             uint32_t mapped_index = 0U;
-            if (!map_valve_id_to_index(raw_id, mapped_index))
+            if (!mapValveIdToIndex(raw_id, mapped_index))
             {
                 printf("stop_run rejected: valve id/index %lu out of range (valves=%lu)\n",
                        static_cast<unsigned long>(raw_id),

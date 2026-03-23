@@ -31,8 +31,13 @@ extern "C" {
 #include "shift_register.hpp"
 #include "cloud/home_assistant_mqtt_bridge.hpp"
 #include "cloud/server_sync_client.hpp"
+#include "local_mode/local_mode_scheduler.hpp"
+#include "local_mode/local_mode_store.hpp"
+#include "local_mode/local_mode_web.hpp"
 
 #include "ca_bsw_esp32.hpp"
+
+struct cJSON;
 
 namespace app {
 
@@ -118,10 +123,25 @@ private:
     app::GlobalCredentials global_credentials_;
     bsw::Ota ota_;
     bsw::Time time_;
+    local_mode::LocalModeSettings local_mode_settings_{};
+    local_mode::LocalModeScheduler local_mode_scheduler_{};
+    local_mode::LocalModeWebServer local_mode_web_server_{};
+    bool local_programs_dirty_for_cloud_ = false;
+    bool local_mode_boot_selected_ = false;
 
     bool isResetButtonPressed() const;
     void serviceResetButton();
     void serviceManualRuns();
+    void serviceLocalPrograms(uint32_t now_unix, uint64_t now_us);
+    void startLocalModeWebServer();
+    std::string buildLocalModeStateJson() const;
+    std::string buildLocalProgramsJson() const;
+    bool applyLocalProgramsJson(const std::string& json_text);
+    bool applyCloudProgramsCommand(uint32_t valve_index, cJSON* command);
+    void markLocalProgramsDirty();
+    bool runLocalManualFromWeb(uint32_t valve_index, uint32_t duration_sec);
+    bool stopLocalManualFromWeb(uint32_t valve_index);
+    bool requestImmediateCloudSyncFromWeb();
     void runWifiStartupFlow();
     void startServerCommunicationTasks();
     static void lateStartTaskEntry(void* context);
@@ -132,6 +152,8 @@ private:
     static void cloudFactoryResetCb(void* context);
     static void cloudUpdateCb(void* context, const char* firmware_url);
     static void cloudSyncOkCb(void* context);
+    static void cloudAugmentSyncValvePayloadCb(void* context, uint32_t valve_index, cJSON* valve_payload);
+    static void cloudSyncValveCommandCb(void* context, uint32_t valve_index, cJSON* valve_command);
     static void haSetValveStateCb(void* context, uint32_t valve_index, bool is_open);
     void handleManualRunCommand(uint32_t valve_index, uint32_t duration_sec);
     void handleStopRunCommand(uint32_t valve_index);
