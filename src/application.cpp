@@ -555,6 +555,10 @@ void Application::serviceResetButton()
                    static_cast<unsigned long>(kResetHoldTimeMs));
             wifi_.clear_wifi_credentials();
             global_credentials_.set_pairing_pin("");
+            if (!global_credentials_.set_local_mode_boot(false))
+            {
+                printf("Warning: failed to clear local mode boot flag during reset.\n");
+            }
             paired_confirmed_.store(false);
             esp_restart();
         }
@@ -1280,6 +1284,11 @@ void Application::cloudFactoryResetCb(void* context)
     }
     printf("Factory reset triggered by cloud command. Clearing Wi-Fi credentials and restarting.\n");
     self->wifi_.clear_wifi_credentials();
+    self->global_credentials_.set_pairing_pin("");
+    if (!self->global_credentials_.set_local_mode_boot(false))
+    {
+        printf("Warning: failed to clear local mode boot flag during cloud factory reset.\n");
+    }
     self->paired_confirmed_.store(false);
     esp_restart();
 }

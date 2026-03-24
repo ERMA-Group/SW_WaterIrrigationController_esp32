@@ -251,9 +251,6 @@ esp_err_t LocalModeWebServer::root_get_handler(httpd_req_t* req)
         button { padding:8px 11px; border-radius:8px; border:0; background:#f74040; color:#fff; font-weight:700; cursor:pointer; }
         button.secondary { background:#334155; }
         input, select { padding:6px; border:1px solid #94a3b8; border-radius:8px; }
-        .days { display:flex; gap:2px; flex-wrap:nowrap; white-space:nowrap; }
-        .day-chip { display:inline-flex; align-items:center; border:1px solid #94a3b8; border-radius:10px; padding:1px 4px; font-size:10px; background:#f8fafc; }
-        .day-chip input { width:11px; height:11px; margin:0 2px 0 0; }
         table { width:100%; border-collapse: collapse; margin-top:10px; }
         th, td { border-bottom:1px solid #e2e8f0; padding:6px 4px; text-align:left; font-size:12px; }
     </style>
@@ -288,10 +285,6 @@ esp_err_t LocalModeWebServer::root_get_handler(httpd_req_t* req)
             q('notice').className = isError ? 'notice err' : 'notice ok';
         }
 
-        function hasDay(mask, bit) {
-            return (mask & (1 << bit)) !== 0;
-        }
-
         async function postWithFallback(endpoints, options) {
             let lastErrorText = '';
             for (const ep of endpoints) {
@@ -313,22 +306,14 @@ esp_err_t LocalModeWebServer::root_get_handler(httpd_req_t* req)
             throw new Error(lastErrorText || 'No matching endpoint available');
         }
 
-        function dayCheckboxes(valveId, index, daysMask) {
-            const labels = ['S','M','T','W','T','F','S'];
-            return labels.map((lbl, bit) =>
-                `<label class='day-chip'><input type='checkbox' data-v='${valveId}' data-p='${index}' data-k='day_${bit}' ${hasDay(daysMask || 0, bit) ? 'checked' : ''}> ${lbl}</label>`
-            ).join('');
-        }
-
         function createProgramRow(valveId, p) {
             return `
             <tr>
-                <td>${p.index}</td>
+                <td>${p.index + 1}</td>
                 <td><input type='checkbox' data-v='${valveId}' data-p='${p.index}' data-k='enabled' ${p.enabled ? 'checked' : ''}></td>
                 <td><input type='number' min='0' max='23' value='${p.hour}' data-v='${valveId}' data-p='${p.index}' data-k='hour' style='width:62px'></td>
                 <td><input type='number' min='0' max='59' value='${p.minute}' data-v='${valveId}' data-p='${p.index}' data-k='minute' style='width:62px'></td>
                 <td><input type='number' min='1' max='86400' value='${p.duration_sec}' data-v='${valveId}' data-p='${p.index}' data-k='duration_sec' style='width:92px'></td>
-                <td><div class='days'>${dayCheckboxes(valveId, p.index, p.days_mask || 0)}</div></td>
             </tr>`;
         }
 
@@ -359,7 +344,7 @@ esp_err_t LocalModeWebServer::root_get_handler(httpd_req_t* req)
                 return `
                     <div class='card'>
                         <div class='valve-title'>
-                            <strong>Valve ${v.id}</strong>
+                            <strong>Valve ${v.id + 1}</strong>
                             <span class='${statusClass}'>${v.status} (remaining ${v.manual_remaining_sec || 0}s)</span>
                         </div>
                         <div class='row' style='margin-top:8px'>
@@ -369,7 +354,7 @@ esp_err_t LocalModeWebServer::root_get_handler(httpd_req_t* req)
                             <button class='secondary' onclick='saveValve(${v.id})'>Save Valve Programs</button>
                         </div>
                         <table>
-                            <thead><tr><th>#</th><th>Enabled</th><th>Hour</th><th>Minute</th><th>Duration(s)</th><th>Days (SMTWTFS)</th></tr></thead>
+                            <thead><tr><th>#</th><th>Enabled</th><th>Hour</th><th>Minute</th><th>Duration(s)</th></tr></thead>
                             <tbody>${rows}</tbody>
                         </table>
                     </div>`;
@@ -389,15 +374,7 @@ esp_err_t LocalModeWebServer::root_get_handler(httpd_req_t* req)
                     if (k === 'enabled') map[k] = el.checked ? 1 : 0;
                     else map[k] = Number(el.value || 0);
                 });
-
-                let daysMask = 0;
-                for (let bit = 0; bit < 7; bit++) {
-                    const dayEl = document.querySelector(`[data-v='${valveId}'][data-p='${i}'][data-k='day_${bit}']`);
-                    if (dayEl && dayEl.checked) {
-                        daysMask |= (1 << bit);
-                    }
-                }
-                map.days_mask = daysMask === 0 ? 0x7F : daysMask;
+                map.days_mask = 0x7F;
                 items.push(map);
             }
             return items;
@@ -448,7 +425,7 @@ esp_err_t LocalModeWebServer::root_get_handler(httpd_req_t* req)
                 await postPrograms({
                     local_mode_enabled: 1,
                     valves: [{ id: valveId, programs: collectValvePrograms(valveId) }]
-                }, `Valve ${valveId} programs saved.`);
+                }, `Valve ${valveId + 1} programs saved.`);
             } catch (e) {
                 setNotice('Save failed: ' + e, true);
             }
@@ -480,7 +457,7 @@ esp_err_t LocalModeWebServer::root_get_handler(httpd_req_t* req)
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: enc({ valve_index: valveId, duration_sec: duration })
                 });
-                setNotice(`Valve ${valveId} started for ${duration}s.`, false);
+                setNotice(`Valve ${valveId + 1} started for ${duration}s.`, false);
                 await refresh();
             } catch (e) {
                 setNotice('Start failed: ' + e, true);
@@ -494,7 +471,7 @@ esp_err_t LocalModeWebServer::root_get_handler(httpd_req_t* req)
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: enc({ valve_index: valveId })
                 });
-                setNotice(`Valve ${valveId} stopped.`, false);
+                setNotice(`Valve ${valveId + 1} stopped.`, false);
                 await refresh();
             } catch (e) {
                 setNotice('Stop failed: ' + e, true);
