@@ -26,7 +26,7 @@ namespace app {
 
 namespace {
 
-constexpr const char* kDefaultOtaUrl = "http://www.erma.sk/fw/SW_WaterIrrigationController_esp32.bin";
+constexpr const char* kDefaultOtaUrl = "http://fwarchive.erma.sk/SW_WaterIrrigationController_esp32.bin";
 
 std::string composeFirmwareVersion()
 {
@@ -344,6 +344,12 @@ void Application::earlyStart()
     comm_manager_.init();
     shift_register_.init();
     ca_bswEsp32_.init(comm_manager_.getDispatcher());
+    ca_bswEsp32_.setValveCountChangedCallback([this](uint32_t new_count) {
+        onValveCountChanged(new_count);
+    });
+    ca_bswEsp32_.setSyncPeriodChangedCallback([this](uint32_t new_period_ms) {
+        onSyncPeriodChanged(new_period_ms);
+    });
 
     // wifi_.connect("ssid", "key_to_wifi");
     // time_.init();
@@ -376,10 +382,16 @@ void Application::lateStart()
     }
     startLocalModeWebServer();
     startServerCommunicationTasks();
+    startWifiReconnectTask();
 }
 
 void Application::startLocalModeWebServer()
 {
+    if (local_mode_web_server_.isRunning())
+    {
+        return;
+    }
+
     local_mode_web_server_.setStateCallback([this]() {
         return buildLocalModeStateJson();
     });
@@ -1105,6 +1117,7 @@ void Application::runWifiStartupFlow()
         {
             valve_count_ = app::sld_cfg::kNumberOfWiredOutputs;
         }
+        // Ensure we don't exceed the maximum supported by the hardware/buffers
         if (valve_count_ > app::sld_cfg::kNumberOfWiredOutputs)
         {
             valve_count_ = app::sld_cfg::kNumberOfWiredOutputs;
@@ -1160,9 +1173,8 @@ void Application::runWifiStartupFlow()
 
     if (!wifi_.connect_from_nvram(kWifiMaxConnectAttempts))
     {
-        printf("Wi-Fi connection failed after %u attempts. Starting provisioning AP for recovery.\n", kWifiMaxConnectAttempts);
-        setup_mode_active_.store(true);
-        wifi_.start_provisioning_portal_blocking();
+        printf("Wi-Fi connection failed after %u attempts. Staying in normal mode and continuing offline; background reconnect task will retry.\n",
+               kWifiMaxConnectAttempts);
         setup_mode_active_.store(false);
         return;
     }
@@ -1360,6 +1372,75 @@ void Application::cloudUpdateCb(void* context, const char* firmware_url)
     }
 }
 
+void Application::startWifiReconnectTask()
+{
+    if (wifi_reconnect_task_handle_ != nullptr)
+    {
+        return;
+    }
+
+    const BaseType_t rc = xTaskCreatePinnedToCore(
+        &Application::wifiReconnectTaskEntry,
+        "wifi_reconnect",
+        4096,
+        this,
+        2,
+        &wifi_reconnect_task_handle_,
+        1);
+    if (rc != pdPASS)
+    {
+        wifi_reconnect_task_handle_ = nullptr;
+        printf("Failed to start wifi_reconnect task.\n");
+    }
+}
+
+void Application::wifiReconnectTaskEntry(void* context)
+{
+    auto* self = static_cast<Application*>(context);
+    if (self != nullptr)
+    {
+        self->wifiReconnectTaskLoop();
+    }
+    vTaskDelete(nullptr);
+}
+
+void Application::wifiReconnectTaskLoop()
+{
+    while (true)
+    {
+        if (!local_mode_boot_selected_ &&
+            !wifi_.is_connected() &&
+            wifi_.has_wifi_credentials())
+        {
+            if (wifi_.is_ap_active())
+            {
+                printf("Wi-Fi reconnect task: AP mode active while disconnected; forcing STA reconnect attempt.\n");
+            }
+            else
+            {
+                printf("Wi-Fi reconnect task: attempting reconnect from stored credentials...\n");
+            }
+            // Try 3 times per cycle instead of 1
+            if (wifi_.connect_from_nvram(3))
+            {
+                printf("Wi-Fi reconnect task: reconnected successfully.\n");
+                startLocalModeWebServer();
+                if (server_tasks_allowed_)
+                {
+                    server_sync_client_.requestImmediateSync();
+                }
+            }
+            else
+            {
+                printf("Wi-Fi reconnect task: reconnect attempt failed. Will retry in %lu ms.\n", 
+                       static_cast<unsigned long>(kWifiReconnectPeriodMs));
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(kWifiReconnectPeriodMs));
+    }
+}
+
 void Application::cloudSyncOkCb(void* context)
 {
     auto* self = static_cast<Application*>(context);
@@ -1521,16 +1602,18 @@ void Application::openValve(uint16_t valve_index)
 
     if (getDeviceType() == DeviceType::Wired)
     {
-        const uint8_t mask = static_cast<uint8_t>(1U << valve_index);
-        const uint8_t new_state = static_cast<uint8_t>(shift_register_.getData(0) | mask);
-        shift_register_.setOutput(0, new_state);
+        const uint16_t register_index = valve_index / 8;
+        const uint8_t bit_index = static_cast<uint8_t>(valve_index % 8);
+        const uint8_t mask = static_cast<uint8_t>(1U << bit_index);
+        const uint8_t new_state = static_cast<uint8_t>(shift_register_.getData(register_index) | mask);
+        shift_register_.setOutput(register_index, new_state);
         shift_register_.updateOutputs();
         taskENTER_CRITICAL(&valve_state_lock_);
         valve_open_states_[valve_index] = true;
         taskEXIT_CRITICAL(&valve_state_lock_);
         server_sync_client_.setValveState(valve_index, true);
         home_assistant_bridge_.publishValveState(valve_index, true);
-        printf("Valve %u opened.\n", valve_index);
+        printf("Valve %u opened (reg %u, bit %u).\n", valve_index, register_index, bit_index);
     }
     else
     {
@@ -1548,9 +1631,11 @@ void Application::closeValve(uint16_t valve_index)
 
     if (getDeviceType() == DeviceType::Wired)
     {
-        const uint8_t mask = static_cast<uint8_t>(1U << valve_index);
-        const uint8_t new_state = static_cast<uint8_t>(shift_register_.getData(0) & static_cast<uint8_t>(~mask));
-        shift_register_.setOutput(0, new_state);
+        const uint16_t register_index = valve_index / 8;
+        const uint8_t bit_index = static_cast<uint8_t>(valve_index % 8);
+        const uint8_t mask = static_cast<uint8_t>(1U << bit_index);
+        const uint8_t new_state = static_cast<uint8_t>(shift_register_.getData(register_index) & static_cast<uint8_t>(~mask));
+        shift_register_.setOutput(register_index, new_state);
         shift_register_.updateOutputs();
     }
 
@@ -1560,6 +1645,52 @@ void Application::closeValve(uint16_t valve_index)
     taskEXIT_CRITICAL(&valve_state_lock_);
     server_sync_client_.setValveState(valve_index, false);
     home_assistant_bridge_.publishValveState(valve_index, false);
+}
+
+void Application::onValveCountChanged(uint32_t new_valve_count)
+{
+    if (new_valve_count == 0U || new_valve_count > app::sld_cfg::kNumberOfWiredOutputs)
+    {
+        printf("onValveCountChanged: invalid count %lu, ignoring.\n",
+               static_cast<unsigned long>(new_valve_count));
+        return;
+    }
+
+    printf("onValveCountChanged: updating from %lu to %lu\n",
+           static_cast<unsigned long>(valve_count_),
+           static_cast<unsigned long>(new_valve_count));
+
+    taskENTER_CRITICAL(&valve_state_lock_);
+    valve_count_ = new_valve_count;
+    taskEXIT_CRITICAL(&valve_state_lock_);
+
+    server_sync_client_.setValveCount(new_valve_count);
+    home_assistant_bridge_.configure(device_hw_id_, new_valve_count);
+
+    // Re-validate local mode settings for the new valve count.
+    local_mode::validate_and_sanitize(local_mode_settings_, new_valve_count);
+    local_mode::save(local_mode_settings_, new_valve_count);
+    local_mode_scheduler_.reset();
+
+    printf("onValveCountChanged: runtime update complete.\n");
+}
+
+void Application::onSyncPeriodChanged(uint32_t new_sync_period_ms)
+{
+    if (new_sync_period_ms < 30000U || new_sync_period_ms > 60000U)
+    {
+        printf("onSyncPeriodChanged: invalid period %lu ms, ignoring.\n",
+               static_cast<unsigned long>(new_sync_period_ms));
+        return;
+    }
+
+    printf("onSyncPeriodChanged: updating from %lu ms to %lu ms\n",
+           static_cast<unsigned long>(sync_period_ms_),
+           static_cast<unsigned long>(new_sync_period_ms));
+
+    sync_period_ms_ = new_sync_period_ms;
+    server_sync_client_.configure(nullptr, nullptr, new_sync_period_ms);
+    printf("onSyncPeriodChanged: runtime update complete.\n");
 }
 
 } // namespace app
@@ -1574,20 +1705,20 @@ extern "C" {
  */
 App_Handle_t * App_Create(void)
 {
-    App_Handle_t * handler = new App_Handle_t;
+    auto* handler = new App_Handler();
     if (handler == nullptr)
     {
         return nullptr;
     }
-    
+
     handler->instance = new app::Application();
-    
+
     if (handler->instance == nullptr)
     {
         delete handler;
         return nullptr;
     }
-    
+
     return handler;
 }
 

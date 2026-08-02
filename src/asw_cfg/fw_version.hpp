@@ -4,8 +4,8 @@
 
 namespace app::fw {
 
-constexpr uint32_t kMajor = 1;
-constexpr uint32_t kMinor = 0;
-constexpr uint32_t kPatch = 1;
+constexpr uint8_t kMajor = 1;
+constexpr uint8_t kMinor = 3;
+constexpr uint16_t kPatch = 0;
 
 } // namespace app::fw

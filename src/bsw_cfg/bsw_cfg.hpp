@@ -12,8 +12,8 @@
 namespace app {
 
 namespace sld_cfg {
-    constexpr uint16_t kSldNumberOfOutputs {1}; // 1 output is 8bits
-    constexpr uint16_t kNumberOfWiredOutputs {8}; // valves
+    constexpr uint16_t kSldNumberOfOutputs {2}; // 2 outputs is 16bits
+    constexpr uint16_t kNumberOfWiredOutputs {16}; // valves
 } // namespace sld_cfg
 
 namespace gpio_cfg

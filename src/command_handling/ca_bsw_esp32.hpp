@@ -8,6 +8,7 @@
 
 #pragma once
 #include <cstdint>
+#include <functional>
 #include "dispatcher.hpp"
 
 #include "ota.hpp"
@@ -25,6 +26,16 @@ public:
     CaBswEsp32(bsw::Uart& uart, bsw::Ota& ota, bsw::Wifi& wifi, app::GlobalCredentials& global_credentials)
         : uart_{uart}, ota_{ota}, wifi_{wifi}, global_credentials_{global_credentials} {}
     ~CaBswEsp32() = default;
+
+    void setValveCountChangedCallback(std::function<void(uint32_t)> callback)
+    {
+        valve_count_changed_callback_ = std::move(callback);
+    }
+
+    void setSyncPeriodChangedCallback(std::function<void(uint32_t)> callback)
+    {
+        sync_period_changed_callback_ = std::move(callback);
+    }
 
     void init(DispatcherBase& dispatcher)
     {
@@ -54,6 +65,8 @@ private:
     bsw::Ota& ota_;
     bsw::Wifi& wifi_;
     app::GlobalCredentials& global_credentials_;
+    std::function<void(uint32_t)> valve_count_changed_callback_;
+    std::function<void(uint32_t)> sync_period_changed_callback_;
 
 };
 

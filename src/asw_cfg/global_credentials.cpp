@@ -250,7 +250,7 @@ bool GlobalCredentials::set_valve_count(uint32_t valve_count)
         return false;
     }
 
-    cache_.valve_count = (valve_count == 0U) ? 8U : valve_count;
+    cache_.valve_count = (valve_count == 0U) ? app::sld_cfg::kNumberOfWiredOutputs : valve_count;
     return save_to_nvs();
 }
 

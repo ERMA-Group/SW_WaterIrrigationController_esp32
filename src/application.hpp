@@ -101,6 +101,7 @@ public:
 private:
     static constexpr uint32_t kResetHoldTimeMs {5000};
     static constexpr uint8_t kWifiMaxConnectAttempts {3};
+    static constexpr uint32_t kWifiReconnectPeriodMs {30000};
 
     command_addapter::CommManager<128, 1024> comm_manager_;
     std::array<uint8_t, 1024> uart_rx_buffer_;
@@ -128,6 +129,7 @@ private:
     local_mode::LocalModeWebServer local_mode_web_server_{};
     bool local_programs_dirty_for_cloud_ = false;
     bool local_mode_boot_selected_ = false;
+    TaskHandle_t wifi_reconnect_task_handle_ = nullptr;
 
     bool isResetButtonPressed() const;
     void serviceResetButton();
@@ -143,8 +145,11 @@ private:
     bool stopLocalManualFromWeb(uint32_t valve_index);
     bool requestImmediateCloudSyncFromWeb();
     void runWifiStartupFlow();
+    void startWifiReconnectTask();
+    void wifiReconnectTaskLoop();
     void startServerCommunicationTasks();
     static void lateStartTaskEntry(void* context);
+    static void wifiReconnectTaskEntry(void* context);
 
     static void cloudManualRunCb(void* context, uint32_t valve_index, uint32_t duration_sec);
     static void cloudStopRunCb(void* context, uint32_t valve_index);
@@ -157,6 +162,8 @@ private:
     static void haSetValveStateCb(void* context, uint32_t valve_index, bool is_open);
     void handleManualRunCommand(uint32_t valve_index, uint32_t duration_sec);
     void handleStopRunCommand(uint32_t valve_index);
+    void onValveCountChanged(uint32_t new_valve_count);
+    void onSyncPeriodChanged(uint32_t new_sync_period_ms);
 
     DeviceType getDeviceType() const;
     void openValve(uint16_t valve_index);

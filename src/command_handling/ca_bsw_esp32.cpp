@@ -68,7 +68,7 @@ void CaBswEsp32::command_otaUpdate(const uint8_t* data, const uint16_t len, uint
     //uart.send(data, len);
     if (len == 0)
     {
-        ota_.start_update("http://www.erma.sk/fw/SW_WaterIrrigationController_esp32.bin");
+        ota_.start_update("http://fwarchive.erma.sk/SW_WaterIrrigationController_esp32.bin");
     }
     else
     {
@@ -300,6 +300,10 @@ void CaBswEsp32::command_setNumberOfValves(const uint8_t* data, const uint16_t l
     }
 
     printf("Valve Count updated: %lu\n", static_cast<unsigned long>(valve_count));
+    if (valve_count_changed_callback_)
+    {
+        valve_count_changed_callback_(valve_count);
+    }
     response_code = 0x01;
 }
 
@@ -340,6 +344,10 @@ void CaBswEsp32::command_setPollingInterval(const uint8_t* data, const uint16_t 
     }
 
     printf("Polling Interval updated: %lu ms\n", static_cast<unsigned long>(interval_ms));
+    if (sync_period_changed_callback_)
+    {
+        sync_period_changed_callback_(interval_ms);
+    }
     response_code = 0x01;
 }
     

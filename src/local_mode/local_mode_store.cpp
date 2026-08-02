@@ -15,6 +15,7 @@ namespace {
 
 constexpr const char* kNs = "local_mode_cfg";
 constexpr const char* kKeySettings = "settings";
+constexpr const char* kKeySettingsSize = "settings_sz";
 
 } // namespace
 
@@ -104,16 +105,43 @@ bool load(LocalModeSettings& out_settings, uint32_t valve_count)
         return false;
     }
 
+    // Check if the stored blob size matches current struct size.
+    // If not (e.g. after kNumberOfWiredOutputs changed), migrate gracefully
+    // by loading what we can and filling the rest with defaults.
+    uint32_t stored_size = 0;
+    const bool size_known = (nvs_get_u32(handle, kKeySettingsSize, &stored_size) == ESP_OK);
+
     LocalModeSettings loaded{};
     size_t required = sizeof(loaded);
     const esp_err_t err = nvs_get_blob(handle, kKeySettings, &loaded, &required);
-    nvs_close(handle);
 
-    if (err != ESP_OK || required != sizeof(loaded))
+    if (err != ESP_OK && err != ESP_ERR_NVS_INVALID_LENGTH)
     {
+        nvs_close(handle);
         set_defaults(out_settings, valve_count);
         return save(out_settings, valve_count);
     }
+
+    if (err == ESP_ERR_NVS_INVALID_LENGTH)
+    {
+        printf("Local mode settings blob too large, resetting.\n");
+        nvs_close(handle);
+        set_defaults(out_settings, valve_count);
+        return save(out_settings, valve_count);
+    }
+
+    // If the stored blob is smaller than current struct (valve count increased),
+    // the trailing valves will remain zero-initialized from the {} initializer.
+    // If it's larger (valve count decreased), we truncate — validate_and_sanitize
+    // will disable valves above the configured count anyway.
+    if (size_known && stored_size != sizeof(loaded))
+    {
+        printf("Local mode settings blob size changed (%lu -> %u). Migrating.\n",
+               static_cast<unsigned long>(stored_size),
+               static_cast<unsigned int>(sizeof(loaded)));
+    }
+
+    nvs_close(handle);
 
     out_settings = loaded;
     if (!validate_and_sanitize(out_settings, valve_count))
@@ -150,6 +178,9 @@ bool save(const LocalModeSettings& settings, uint32_t valve_count)
         nvs_close(handle);
         return false;
     }
+
+    // Store the blob size so future loads can detect struct layout changes.
+    nvs_set_u32(handle, kKeySettingsSize, static_cast<uint32_t>(sizeof(sanitized)));
 
     const esp_err_t commit_err = nvs_commit(handle);
     nvs_close(handle);

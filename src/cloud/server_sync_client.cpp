@@ -11,6 +11,7 @@
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "esp_wifi.h"
 
 #include "cloud/webservice_api.hpp"
@@ -292,6 +293,9 @@ void ServerSyncClient::pollTaskEntry(void* arg)
 
 void ServerSyncClient::syncTaskLoop()
 {
+    // Unsubscribe from task watchdog — HTTPS POST can block for seconds.
+    esp_task_wdt_delete(nullptr);
+
     while (true)
     {
         if (!postDeviceSync())
@@ -490,6 +494,10 @@ bool ServerSyncClient::postDeviceSync()
 
 void ServerSyncClient::pollTaskLoop()
 {
+    // Unsubscribe from task watchdog — this task blocks for up to 30s
+    // on HTTPS long-poll I/O, which would trigger TWDT reset.
+    esp_task_wdt_delete(nullptr);
+
     printf("commands_poll task started\n");
     printf("commands_poll interval ms=%lu\n", static_cast<unsigned long>(sync_period_ms_));
     uint32_t poll_tick = 0U;
