@@ -5,6 +5,6 @@
 namespace app::fw {
 
 // Auto-incremented by CMake post-build step.
-constexpr uint32_t kBuild = 169;
+constexpr uint32_t kBuild = 171;
 
 } // namespace app::fw

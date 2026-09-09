@@ -215,59 +215,13 @@ void ServerSyncClient::requestImmediateSync()
 
 void ServerSyncClient::start()
 {
-    printf("server_sync start: hw_id='%s' sync_period_ms=%lu\n",
-           device_hw_id_.c_str(),
-           static_cast<unsigned long>(sync_period_ms_));
+    xTaskCreate(syncTaskEntry, "sync_task", 4096, this, 5, &sync_task_handle_);
+    xTaskCreate(pollTaskEntry, "poll_task", 4096, this, 5, &poll_task_handle_);
+}
 
-    if (sync_task_handle_ == nullptr)
-    {
-        const BaseType_t rc = xTaskCreatePinnedToCore(
-            &ServerSyncClient::syncTaskEntry,
-            "device_sync",
-            8192,
-            this,
-            4,
-            &sync_task_handle_,
-            1);
-        if (rc != pdPASS)
-        {
-            sync_task_handle_ = nullptr;
-            printf("server_sync: failed to create sync task\n");
-        }
-        else
-        {
-            printf("server_sync: sync task created handle=%p\n", static_cast<void*>(sync_task_handle_));
-        }
-    }
-    else
-    {
-        printf("server_sync: sync task already running handle=%p\n", static_cast<void*>(sync_task_handle_));
-    }
-
-    if (poll_task_handle_ == nullptr)
-    {
-        const BaseType_t rc = xTaskCreatePinnedToCore(
-            &ServerSyncClient::pollTaskEntry,
-            "device_poll",
-            10240,
-            this,
-            4,
-            &poll_task_handle_,
-            0);
-        if (rc != pdPASS)
-        {
-            poll_task_handle_ = nullptr;
-            printf("server_sync: failed to create poll task\n");
-        }
-        else
-        {
-            printf("server_sync: poll task created handle=%p\n", static_cast<void*>(poll_task_handle_));
-        }
-    }
-    else
-    {
-        printf("server_sync: poll task already running handle=%p\n", static_cast<void*>(poll_task_handle_));
-    }
+void ServerSyncClient::setCommandPollingStrugglingCallback(void (*callback)(bool))
+{
+    command_polling_struggling_callback_ = callback;
 }
 
 void ServerSyncClient::syncTaskEntry(void* arg)
@@ -540,11 +494,36 @@ bool ServerSyncClient::pollCommandsOnce()
     std::string response;
     const std::string poll_url = poll_url_base_ + device_hw_id_;
     printf("commands_poll request: %s\n", poll_url.c_str());
-    const auto result = WebServiceApi::GetJson(poll_url, response, 30000);
+
+    const int max_retries = 3;
+    WebServiceApi::Result result;
+    for (int i = 0; i < max_retries; ++i)
+    {
+        result = WebServiceApi::GetJson(poll_url, response, 30000);
+        if (WebServiceApi::IsSuccess(result))
+        {
+            break;
+        }
+        printf("commands_poll attempt %d failed: %s\n", i + 1, WebServiceApi::ResultToString(result));
+        if (i < max_retries - 1)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
     if (!WebServiceApi::IsSuccess(result))
     {
-        printf("commands_poll failed: %s\n", WebServiceApi::ResultToString(result));
+        printf("commands_poll failed after %d retries: %s\n", max_retries, WebServiceApi::ResultToString(result));
+        if (command_polling_struggling_callback_ != nullptr)
+        {
+            command_polling_struggling_callback_(true);
+        }
         return false;
+    }
+
+    if (command_polling_struggling_callback_ != nullptr)
+    {
+        command_polling_struggling_callback_(false);
     }
 
         const size_t preview_len = (response.size() > kMaxLoggedPayloadBytes) ? kMaxLoggedPayloadBytes : response.size();

@@ -40,6 +40,7 @@ public:
     void setValveState(uint32_t valve_index, bool is_open);
     void requestImmediateSync();
     void start();
+    void setCommandPollingStrugglingCallback(void (*callback)(bool));
 
 private:
     static constexpr uint32_t kDefaultSyncPeriodMs {60000};
@@ -61,6 +62,7 @@ private:
 
     TaskHandle_t sync_task_handle_ = nullptr;
     TaskHandle_t poll_task_handle_ = nullptr;
+    void (*command_polling_struggling_callback_)(bool) = nullptr;
 
     static void syncTaskEntry(void* arg);
     static void pollTaskEntry(void* arg);
